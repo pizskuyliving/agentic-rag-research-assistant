@@ -453,6 +453,13 @@ def generate(state: ResearchState) -> dict:
             catatan += f" -> perbaikan gagal ({e})"
     state = {**state, "trace": _jejak(state, catatan)}
 
+    # Jawaban berupa pernyataan "informasi tidak ada di sumber" tidak perlu daftar sumber:
+    # sitasi pada kalimat seperti itu menyesatkan (seolah-olah sumber mendukung sesuatu).
+    if _jawaban_tidak_ada(jawaban):
+        jawaban = re.sub(r"\s*(\[\d+\])+", "", jawaban).strip()
+        return {"answer": jawaban, "citations": [], "from_collection": True,
+                "trace": _jejak(state, "generate: informasi tidak ditemukan di sumber (sitasi dihapus)")}
+
     # Hanya tampilkan sumber yang benar-benar disitasi di jawaban
     dipakai = sorted({int(n) for n in re.findall(r"\[(\d+)\]", jawaban) if 1 <= int(n) <= len(sumber)})
     citations = [{**sumber[n - 1], "nomor": n} for n in dipakai]
@@ -465,6 +472,20 @@ def _rapikan_sitasi(teks: str) -> str:
     Juga [1, 3] / [1][3] dibiarkan, keduanya terbaca."""
     teks = re.sub(r"[【［]\s*(\d+)\s*[】］]", r"[\1]", teks)
     return re.sub(r"\[(\d+)\s*,\s*(\d+)\]", r"[\1][\2]", teks)
+
+
+_POLA_TIDAK_ADA = re.compile(
+    r"tidak (terdapat|ada|ditemukan|disebutkan|dibahas|memuat|menyebutkan|membahas)\b.{0,60}"
+    r"(informasi|data|penjelasan|hasil|angka|nilai)|"
+    r"(informasi|data)\b.{0,40}tidak (tersedia|ditemukan|disebutkan)|"
+    r"(do(es)? not|no) (mention|information|data|report)", re.IGNORECASE)
+
+
+def _jawaban_tidak_ada(jawaban: str) -> bool:
+    """Jawaban pendek (maks. 2 kalimat) yang intinya menyatakan informasinya tidak ada di sumber."""
+    tanpa_sitasi = re.sub(r"\[\d+\]", "", jawaban)
+    kalimat = [k for k in re.split(r"(?<=[.!?])\s+", tanpa_sitasi.strip()) if k.strip()]
+    return len(kalimat) <= 2 and len(tanpa_sitasi) < 400 and bool(_POLA_TIDAK_ADA.search(tanpa_sitasi))
 
 
 def _cek_sitasi(jawaban: str) -> tuple[int, int, list[str]]:

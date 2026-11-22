@@ -9,6 +9,11 @@
 | `.streamlit/config.toml` | Batas unggahan 20 MB |
 | `streamlit_app.py` | Pertanyaan disimpan bersama jawabannya: tidak lagi muncul dua kali jika proses sempat terputus |
 | `app/ingestion/indexer.py` | `daftar_jurnal()` dan `hapus_jurnal()` untuk UI |
+| `app/llm.py`, `app/config.py`, `.env.example` | Cadangan baru: Cloudflare Workers AI dan Fireworks AI (keduanya gpt-oss-120b). Urutan: NVIDIA, Groq, Cloudflare, Fireworks, Gemini, Mistral |
+| `app/llm.py` | Model yang gagal setelah semua percobaan dilewati 3 menit (tidak dicoba ulang di setiap panggilan); pesan error ditampilkan singkat |
+| `app/llm.py` | Urutan model diatur sendiri: 429 per menit / error server -> tunggu & ulangi model yang SAMA; kuota harian -> tandai habis lalu pindah. Tes: kuota harian Gemini (500 permintaan) habis karena fallback seketika setiap NVIDIA kena batas 40/menit |
+| `app/agent/nodes.py` | Jawaban pendek yang menyatakan "informasi tidak ada di sumber" tidak lagi menampilkan daftar sumber (tes: pertanyaan SVM-KBBI menolak dengan benar tapi mencantumkan 6 sumber) |
+| `app/agent/prompts.py` | Generate diminta menjawab SEMUA bagian pertanyaan dan menyertakan angka persis (tes: "jumlah ulasan dan akurasi" hanya dijawab akurasinya) |
 | `app/ingestion/indexer.py` | Juara BM25: chunk peringkat 1 BM25 tiap query dijamin masuk kandidat. Tes: bagian 3.5 Positional Encoding (BM25 peringkat 1) kalah RRF dari pendahuluan hal. 1-2 |
 | `app/agent/nodes.py` | Grade melihat chunk utuh (1200 karakter, sebelumnya 750); chunk yang lebih panjang dikirim bagian yang paling banyak memuat kata pertanyaan. Tes: chunk berisi "Table 1 ..." lalu "3.5 Positional Encoding" terpotong sebelum bagian pentingnya |
 | `app/agent/nodes.py`, `indexer.py` | Batas kandidat per jurnal menyesuaikan ukuran koleksi (1 jurnal: 12, 2 jurnal: 6, 3+: 5). Tes: koleksi 1 jurnal hanya dapat 5 kandidat, pertanyaan positional encoding gagal |

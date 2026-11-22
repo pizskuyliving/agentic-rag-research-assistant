@@ -12,8 +12,11 @@ ikut dihitung dalam max_tokens. Karena itu:
 - reasoning_effort diset "low" (cukup untuk tugas klasifikasi & sitasi, hemat token)
 - max_tokens tidak boleh terlalu kecil, kalau tidak jawaban bisa kosong
 
-Jika kena batas kuota per menit (429), panggilan menunggu sesuai saran server lalu
-mencoba lagi. Jika tetap gagal, litellm pindah ke cadangan (NVIDIA/Gemini/Mistral) bila diisi.
+Urutan model dicoba satu per satu (model utama dulu, lalu cadangan). Untuk SETIAP model:
+- batas per menit (429) atau error server sementara -> TUNGGU lalu coba model yang sama lagi;
+- kuota harian habis -> model itu ditandai habis (tidak dicoba lagi) lalu pindah ke berikutnya.
+Dulu pindah ke cadangan terjadi seketika saat 429: kuota harian Gemini (500 permintaan)
+habis tersedot hanya karena NVIDIA sesekali kena batas 40 permintaan/menit.
 """
 import re
 import time
@@ -36,7 +39,9 @@ def _key_untuk(model: str) -> str:
     """API key sesuai penyedia di awalan nama model (groq/..., nvidia_nim/..., gemini/...)."""
     awalan = model.split("/", 1)[0]
     return {"groq": config.GROQ_API_KEY, "nvidia_nim": config.NVIDIA_API_KEY,
-            "gemini": config.GEMINI_API_KEY, "mistral": config.MISTRAL_API_KEY}.get(awalan, "")
+            "gemini": config.GEMINI_API_KEY, "mistral": config.MISTRAL_API_KEY,
+            "cloudflare": config.CLOUDFLARE_API_KEY,
+            "fireworks_ai": config.FIREWORKS_AI_API_KEY}.get(awalan, "")
 
 
 def _bangun_router() -> Router:
@@ -53,6 +58,8 @@ def _bangun_router() -> Router:
     cadangan = []
     for nama, model in [("cadangan-nvidia", config.MODEL_CADANGAN_NVIDIA),
                         ("cadangan-groq", config.MODEL_CADANGAN_GROQ),
+                        ("cadangan-cloudflare", config.MODEL_CADANGAN_CLOUDFLARE),
+                        ("cadangan-fireworks", config.MODEL_CADANGAN_FIREWORKS),
                         ("cadangan-gemini", config.MODEL_CADANGAN_GEMINI),
                         ("cadangan-mistral", config.MODEL_CADANGAN_MISTRAL)]:
         if model and model not in utama and _key_untuk(model):
@@ -60,15 +67,16 @@ def _bangun_router() -> Router:
                                "litellm_params": {"model": model, "api_key": _key_untuk(model)}})
             cadangan.append(nama)
 
-    # Kuota dihitung per model, jadi model utama yang lain juga bisa jadi cadangan.
-    fallbacks = [
-        {"ringan": ["berat", *cadangan]},
-        {"berat": [*cadangan, "ringan"]},
-    ]
-    # num_retries=0: penantian saat 429 ditangani sendiri di panggil_llm (lebih sabar)
-    return Router(model_list=model_list, fallbacks=fallbacks, num_retries=0)
+    global _cadangan
+    _cadangan = cadangan
+    # Tanpa fallbacks/num_retries bawaan: urutan & penantian diatur sendiri di _completion
+    return Router(model_list=model_list, num_retries=0)
 
 
+_cadangan: list[str] = []
+_habis: set[str] = set()   # model yang kuota hariannya habis selama proses ini berjalan
+_istirahat: dict[str, float] = {}   # model -> waktu (time.time) sampai kapan dilewati sementara
+ISTIRAHAT_DETIK = 180              # model yang gagal terus-menerus dilewati selama 3 menit
 _router = None
 
 
@@ -94,47 +102,64 @@ def _kuota_harian(err: Exception) -> bool:
     return "tokens per day" in teks or "(TPD)" in teks or "requests per day" in teks or "(RPD)" in teks
 
 
+_SEMENTARA = ("Error code: 410", "Error code: 500", "Error code: 502", "Error code: 504", "503",
+              "UNAVAILABLE", "high demand", "overloaded", "Timeout", "timed out")
+
+
+def _rantai(peran: str) -> list[str]:
+    """Urutan model yang dicoba untuk sebuah peran (tanpa duplikat model yang sama)."""
+    urutan = ["ringan", "berat", *_cadangan] if peran == "ringan" else ["berat", *_cadangan, "ringan"]
+    hasil, model_terpakai = [], set()
+    for nama in urutan:
+        model = {"ringan": config.MODEL_RINGAN, "berat": config.MODEL_BERAT}.get(nama, nama)
+        if model not in model_terpakai:
+            model_terpakai.add(model)
+            hasil.append(nama)
+    return hasil
+
+
 def _completion(peran: str, **kwargs):
     global _router
     if _router is None:
-        if not config.GROQ_API_KEY:
-            raise RuntimeError("GROQ_API_KEY belum diisi di file .env")
         _router = _bangun_router()
 
-    for percobaan in range(MAKS_COBA_ULANG + 1):
-        try:
-            return _router.completion(model=peran, **kwargs)
-        except Exception as e:
-            tunggu = _detik_tunggu(e)
-            harian = _kuota_harian(e)
-            # Groq habis kuota harian, TAPI cadangan hanya sibuk sementara (mis. Gemini 503
-            # "high demand"): tunggu sebentar lalu coba lagi, jangan langsung menyerah.
-            # Error sementara dari server (mis. NVIDIA 410/502, Gemini 503 "high demand"):
-            # tunggu sebentar lalu coba lagi, jangan langsung menyerah.
-            sementara = any(t in str(e) for t in ("Error code: 410", "Error code: 500", "Error code: 502",
-                                                  "Error code: 504", "503", "UNAVAILABLE",
-                                                  "high demand", "overloaded", "Timeout"))
-            if sementara and percobaan < MAKS_COBA_ULANG:
-                print("   (server model sedang bermasalah sementara, menunggu 15 detik lalu coba lagi...)")
-                time.sleep(15)
-                continue
-            # Model utama BUKAN Groq (mis. NVIDIA): pesan "kuota harian" berasal dari cadangan Groq,
-            # sedangkan model utama biasanya hanya kena batas per menit -> tunggu lalu coba lagi.
-            if harian and not config.MODEL_BERAT.startswith("groq/") and percobaan < MAKS_COBA_ULANG:
-                print("   (model utama sibuk/batas per menit, cadangan Groq habis kuota harian; menunggu 20 detik...)")
-                time.sleep(20)
-                continue
-            # kuota harian habis: menunggu sebentar tidak membantu; atau sudah dicoba berkali-kali
-            if harian and tunggu is not None and (tunggu > 70 or percobaan == MAKS_COBA_ULANG):
-                raise KuotaHarianHabis(
-                    "Kuota token HARIAN semua model sudah habis (model utama dan cadangan). "
-                    f"Coba lagi sekitar {tunggu / 60:.0f} menit lagi, atau isi NVIDIA_API_KEY / "
-                    "GEMINI_API_KEY di .env sebagai cadangan.") from None
-            if tunggu is None or percobaan == MAKS_COBA_ULANG:
-                raise
-            jeda = min(tunggu, 65)
-            print(f"   (kuota per menit penuh, menunggu {jeda:.0f} detik...)")
-            time.sleep(jeda)
+    galat_terakhir, ada_harian = None, False
+    for nama in _rantai(peran):
+        if nama in _habis:
+            ada_harian = True
+            continue
+        if _istirahat.get(nama, 0) > time.time():
+            continue
+        for percobaan in range(MAKS_COBA_ULANG + 1):
+            try:
+                return _router.completion(model=nama, **kwargs)
+            except Exception as e:
+                galat_terakhir = e
+                if _kuota_harian(e):
+                    _habis.add(nama)
+                    ada_harian = True
+                    print(f"   ({nama}: kuota harian habis, pindah ke model berikutnya)")
+                    break
+                tunggu = _detik_tunggu(e)
+                sementara = any(t in str(e) for t in _SEMENTARA)
+                if percobaan == MAKS_COBA_ULANG or (tunggu is None and not sementara):
+                    # Jangan buang waktu mencoba model ini di setiap panggilan berikutnya
+                    _istirahat[nama] = time.time() + ISTIRAHAT_DETIK
+                    pesan = " ".join(str(e).split())[:160]
+                    print(f"   ({nama} gagal, dilewati {ISTIRAHAT_DETIK // 60} menit: {pesan})")
+                    break
+                jeda = min(tunggu, 65) if tunggu is not None else 15
+                print(f"   ({nama}: batas per menit / server sibuk, menunggu {jeda:.0f} detik...)")
+                time.sleep(jeda)
+
+    if galat_terakhir is None and _istirahat:   # semua model yang tersisa sedang "istirahat"
+        _istirahat.clear()
+        return _completion(peran, **kwargs)
+    if ada_harian:
+        raise KuotaHarianHabis(
+            "Kuota HARIAN model utama dan semua cadangan sudah habis. Coba lagi besok, "
+            "atau isi API key cadangan lain di .env (NVIDIA_API_KEY / GEMINI_API_KEY / GROQ_API_KEY).")
+    raise galat_terakhir
 
 
 def panggil_llm(prompt: str, peran: str = "berat", system: str | None = None,

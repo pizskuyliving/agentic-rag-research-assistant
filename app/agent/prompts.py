@@ -91,7 +91,9 @@ GENERATE_SYSTEM = (
 )
 
 PENGINGAT_SITASI = (
-    "PENTING: akhiri SETIAP kalimat yang berisi klaim dengan nomor sumbernya, misalnya [2] atau [1][4]. "
+    "PENTING: jawab SEMUA bagian pertanyaan (jika ditanya 'jumlah dan akurasi', sebutkan keduanya) dan "
+    "sertakan angka persis dari sumber bila ada. Akhiri SETIAP kalimat yang berisi klaim dengan nomor "
+    "sumbernya, misalnya [2] atau [1][4]. "
     "Jawaban tanpa sitasi di setiap kalimat klaim dianggap GAGAL. Jangan menulis daftar referensi di akhir."
 )
 
