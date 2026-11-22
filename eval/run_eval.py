@@ -56,18 +56,22 @@ def nilai(soal: dict, hasil: dict) -> list[tuple[str, bool]]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--user", required=True)
+    ap.add_argument("--soal", default="",
+                    help="jalankan soal tertentu saja, mis. --soal 5,6,7 (nomor mulai dari 1)")
     ap.add_argument("--jeda", type=int, default=30,
                     help="detik jeda antar soal, agar kuota token per menit Groq gratis tidak habis")
     args = ap.parse_args()
 
+    pilihan = {int(x) for x in args.soal.split(",") if x.strip().isdigit()}
+    semua_soal = [json.loads(b) for b in FILE_SOAL.read_text(encoding="utf-8").splitlines() if b.strip()]
+    daftar = [(n, s) for n, s in enumerate(semua_soal, start=1) if not pilihan or n in pilihan]
+
     total_lulus = total_cek = 0
-    for i, baris in enumerate(FILE_SOAL.read_text(encoding="utf-8").splitlines()):
-        if not baris.strip():
-            continue
+    rekap = []
+    for i, (nomor, soal) in enumerate(daftar):
         if i > 0 and args.jeda:
             print(f"\n(jeda {args.jeda} detik untuk kuota per menit...)")
             time.sleep(args.jeda)
-        soal = json.loads(baris)
         hasil = tanya_agen(soal["pertanyaan"], user_id=args.user)
         cek = nilai(soal, hasil)
         lulus = sum(ok for _, ok in cek)
@@ -75,7 +79,7 @@ def main() -> None:
         total_cek += len(cek)
 
         print("=" * 90)
-        print(f"T: {soal['pertanyaan']}")
+        print(f"#{nomor} [{soal.get('jenis', '-')}] T: {soal['pertanyaan']}")
         print(f"Jejak: {' > '.join(hasil.get('trace', []))}")
         print(f"\n{hasil['answer']}\n")
         for s in hasil.get("citations", []):
@@ -83,10 +87,16 @@ def main() -> None:
         print(f"\nSkor otomatis: {lulus}/{len(cek)}")
         for nama, ok in cek:
             print(f"  {'LULUS' if ok else 'GAGAL'}  {nama}")
+        if soal.get("perlu_dicek"):
+            print("Catatan: kunci jawaban soal ini disusun tanpa membaca jurnalnya; cek ke PDF.")
+        rekap.append((nomor, soal.get("jenis", "-"), lulus, len(cek)))
         if soal.get("catatan_rag_dasar"):
             print(f"Pembanding (RAG dasar): {soal['catatan_rag_dasar']}")
 
     print("=" * 90)
+    print("REKAP")
+    for nomor, jenis, lulus, n in rekap:
+        print(f"  #{nomor:<3} {lulus}/{n}  {jenis}")
     print(f"TOTAL skor otomatis: {total_lulus}/{total_cek}")
 
 
