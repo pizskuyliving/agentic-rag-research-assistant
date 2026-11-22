@@ -3,6 +3,7 @@
 Setiap chunk menyimpan `user_id`, dan setiap pencarian WAJIB difilter per user,
 supaya jurnal milik satu orang tidak pernah muncul di jawaban orang lain.
 """
+import re
 import uuid
 from functools import lru_cache
 
@@ -98,13 +99,14 @@ def simpan_jurnal(jurnal: Jurnal, chunks: list[Chunk], user_id: str) -> int:
     return len(points)
 
 
-def _cari_satu(query: str, user_id: str, limit: int) -> list[dict]:
+def _cari_satu(query: str, user_id: str, limit: int, paper_id: str | None = None) -> list[dict]:
+    syarat = [models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))]
+    if paper_id:
+        syarat.append(models.FieldCondition(key="paper_id", match=models.MatchValue(value=paper_id)))
     hasil = _client().query_points(
         collection_name=config.QDRANT_COLLECTION,
         query=embed_query(query),
-        query_filter=models.Filter(must=[
-            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id)),
-        ]),
+        query_filter=models.Filter(must=syarat),
         limit=limit,
         with_payload=True,
     ).points
@@ -181,12 +183,67 @@ def cari_tabel(queries: list[str], user_id: str, limit: int = 3) -> list[dict]:
     return [{**dokumen[i], "skor": 0.0, "rrf": 0.0} for i in urut]
 
 
+def _ringkas(teks: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", teks.lower())
+
+
+def jurnal_untuk_istilah(istilah: str, user_id: str) -> str | None:
+    """Tebak jurnal "rumah" sebuah nama metode, mis. "Self-RAG" -> paper Asai dkk.
+
+    1. Jurnal yang JUDULNYA memuat istilah itu (paling pasti).
+    2. Jika tidak ada: jurnal yang paling sering menyebut istilah itu, asalkan jelas dominan
+       (mis. "CRAG" tidak ada di judul "Corrective Retrieval Augmented Generation",
+       tapi disebut puluhan kali di paper itu dan hanya sesekali di paper lain).
+    """
+    _, dokumen = _indeks_bm25(user_id)
+    kunci = _ringkas(istilah)
+    if len(kunci) < 3:
+        return None
+    for d in dokumen:
+        if kunci in _ringkas(d.get("judul", "")):
+            return d["paper_id"]
+    pola = re.compile(rf"(?<![\w-]){re.escape(istilah)}(?![\w-])")
+    hitung: dict[str, int] = {}
+    for d in dokumen:
+        n = len(pola.findall(d["teks"]))
+        if n:
+            hitung[d["paper_id"]] = hitung.get(d["paper_id"], 0) + n
+    if not hitung:
+        return None
+    urut = sorted(hitung.items(), key=lambda x: x[1], reverse=True)
+    terbanyak, n1 = urut[0]
+    n2 = urut[1][1] if len(urut) > 1 else 0
+    return terbanyak if n1 >= 5 and n1 >= 2 * n2 else None
+
+
+# Judul daftar pustaka: kata berhuruf kapital diikuti baris baru. Di teks PDF judul ini sering
+# menempel di akhir kalimat sebelumnya ("... gifts from AI2. REFERENCES\nAkari Asai, ...").
+_POLA_REFERENSI = re.compile(r"\b(References|REFERENCES|Daftar Pustaka|DAFTAR PUSTAKA|Bibliography|BIBLIOGRAPHY)\s*\n")
+
+
+def struktur_paper(user_id: str, paper_id: str) -> dict:
+    """Perkiraan struktur sebuah paper dari posisi chunk-nya.
+
+    - mulai_referensi: urutan chunk tempat daftar pustaka dimulai (sesudahnya = referensi/lampiran)
+    - tengah_isi: titik tengah isi utama (hal. > 2 dan sebelum referensi). Paruh pertama isi
+      biasanya bagian metode; paruh kedua biasanya eksperimen dan hasil.
+    """
+    _, dokumen = _indeks_bm25(user_id)
+    milik = [d for d in dokumen if d["paper_id"] == paper_id]
+    ref = [d["urutan"] for d in milik if _POLA_REFERENSI.search(d["teks"])]
+    mulai_referensi = min(ref) if ref else None
+    isi = [d["urutan"] for d in milik
+           if d["halaman"] > 2 and (mulai_referensi is None or d["urutan"] < mulai_referensi)]
+    tengah_isi = (min(isi) + max(isi)) / 2 if isi else None
+    return {"mulai_referensi": mulai_referensi, "tengah_isi": tengah_isi}
+
+
 # ------------------------------------------------------------------ hybrid search
 RRF_K = 60  # konstanta standar Reciprocal Rank Fusion
 
 
 def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
-         maks_per_jurnal: int = 2) -> list[dict]:
+         maks_per_jurnal: int = 2, paper_id: str | None = None) -> list[dict]:
     """Hybrid search: vektor (makna) + BM25 (kata kunci), HANYA dari jurnal milik user_id.
 
     - Setiap query dicari dua kali: lewat vektor dan lewat BM25.
@@ -194,6 +251,7 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
       skor = jumlah 1 / (60 + peringkat) dari setiap daftar tempat chunk itu muncul.
       Chunk yang konsisten muncul di banyak daftar akan naik ke atas.
     - `maks_per_jurnal` mencegah satu jurnal menguasai semua hasil.
+    - `paper_id` (opsional) membatasi pencarian ke SATU jurnal saja.
     """
     siapkan_koleksi()
     if isinstance(queries, str):
@@ -213,9 +271,15 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
 
     bm25, dokumen = _indeks_bm25(user_id)
     for q in queries:
-        for peringkat, item in enumerate(_cari_satu(q, user_id, limit=per_daftar), start=1):
+        for peringkat, item in enumerate(_cari_satu(q, user_id, limit=per_daftar, paper_id=paper_id), start=1):
             tambah(item, peringkat)
-        for peringkat, (i, _) in enumerate(bm25.cari(q, limit=per_daftar), start=1):
+        if paper_id:
+            skor = bm25.skor(q)
+            teratas = sorted((i for i, d in enumerate(dokumen) if d["paper_id"] == paper_id and skor[i] > 0),
+                             key=lambda i: skor[i], reverse=True)[:per_daftar]
+        else:
+            teratas = [i for i, _ in bm25.cari(q, limit=per_daftar)]
+        for peringkat, i in enumerate(teratas, start=1):
             tambah(dokumen[i], peringkat)
 
     for kunci, nilai in rrf.items():

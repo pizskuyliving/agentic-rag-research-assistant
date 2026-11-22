@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from app.agent.graph import tanya_agen
+from app.llm import KuotaHarianHabis
 
 FILE_SOAL = Path(__file__).parent / "questions.jsonl"
 
@@ -72,16 +73,24 @@ def main() -> None:
     for putaran in range(1, args.ulang + 1):
         if args.ulang > 1:
             print(f"\n{'#' * 30} PUTARAN {putaran}/{args.ulang} {'#' * 30}")
-        semua_rekap.append(_jalankan(daftar, args))
+        rekap = _jalankan(daftar, args)
+        semua_rekap.append(rekap)
+        if len(rekap) < len(daftar):      # terhenti (kuota habis): jangan mulai putaran berikutnya
+            break
 
-    if args.ulang > 1:
+    if args.ulang > 1 and len(semua_rekap) > 1:
         print("=" * 90)
         print(f"RATA-RATA {args.ulang} PUTARAN")
         for idx, (nomor, jenis, _, n) in enumerate(semua_rekap[0]):
-            nilai_soal = [r[idx][2] for r in semua_rekap]
+            nilai_soal = [r[idx][2] for r in semua_rekap if idx < len(r)]
             print(f"  #{nomor:<3} {'/'.join(map(str, nilai_soal))} dari {n}  {jenis}")
-        totals = [sum(x[2] for x in r) for r in semua_rekap]
+        lengkap = [r for r in semua_rekap if len(r) == len(semua_rekap[0])]
+        if len(lengkap) < len(semua_rekap):
+            print("  (putaran yang terhenti di tengah tidak ikut dirata-rata)")
+        totals = [sum(x[2] for x in r) for r in lengkap]
         maks = sum(x[3] for x in semua_rekap[0])
+        if not totals:
+            return
         rata = sum(totals) / len(totals)
         print(f"TOTAL per putaran: {totals} dari {maks} | rata-rata {rata:.1f}/{maks} = {100 * rata / maks:.1f}%")
 
@@ -93,7 +102,13 @@ def _jalankan(daftar: list, args) -> list:
         if i > 0 and args.jeda:
             print(f"\n(jeda {args.jeda} detik untuk kuota per menit...)")
             time.sleep(args.jeda)
-        hasil = tanya_agen(soal["pertanyaan"], user_id=args.user)
+        try:
+            hasil = tanya_agen(soal["pertanyaan"], user_id=args.user)
+        except KuotaHarianHabis as e:
+            print("=" * 90)
+            print(f"BERHENTI di soal #{nomor}: {e}")
+            print("Rekap di bawah hanya untuk soal yang sudah selesai.")
+            break
         cek = nilai(soal, hasil)
         lulus = sum(ok for _, ok in cek)
         total_lulus += lulus

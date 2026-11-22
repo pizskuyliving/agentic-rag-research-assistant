@@ -5,7 +5,7 @@ import re
 from app import config
 from app.agent import prompts
 from app.agent.state import ResearchState
-from app.ingestion.indexer import ambil_chunk, cari, cari_tabel
+from app.ingestion.indexer import ambil_chunk, cari, cari_tabel, jurnal_untuk_istilah, struktur_paper
 from app.llm import panggil_llm
 from app.query import variasi_query
 
@@ -22,6 +22,11 @@ POTONG_UNTUK_EVALUASI = 500
 MAKS_PUTARAN_ULANG = 1
 # Maksimal chunk relevan yang dikirim ke Generate (akumulasi semua putaran)
 MAKS_SUMBER_GENERATE = 6
+# Berapa chunk "jangkar" diambil dari paper asli tiap metode yang disebut di pertanyaan.
+# Jangkar DIJAMIN ikut ke Generate walau ditolak Grade (lihat grade()).
+JANGKAR_PER_ENTITAS = 2
+# Berapa calon jangkar diambil dari paper itu sebelum dipilih ulang (lihat _kelas_jangkar)
+CALON_JANGKAR = 30
 # Minimal proporsi kalimat klaim yang bersitasi; di bawah ini jawaban diminta diperbaiki
 MIN_RASIO_SITASI = 0.7
 # Batas total karakter konteks untuk Generate setelah ditambah chunk tetangga
@@ -102,9 +107,111 @@ _POLA_DAFTAR = re.compile(
     r"what are|which|types? of|kinds? of|list|components?|steps)\b", re.IGNORECASE)
 
 
+# Nama metode/sistem: "Self-RAG", "Adaptive-RAG", "CRAG", "IndoBERT", "RAG-Token", "BM25"
+_POLA_METODE = re.compile(r"\b(?:[A-Za-z]+-[A-Z][A-Za-z0-9]*|[A-Z]{2,}[A-Za-z0-9]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*)\b")
+# Singkatan umum yang bukan nama metode spesifik (akan "menarik" paper yang salah)
+_BUKAN_METODE = {"RAG", "LLM", "LLMS", "AI", "PDF", "NLP", "QA", "ID", "EN", "API", "GPU", "URL"}
+
+
+def _nama_metode(pertanyaan: str) -> list[str]:
+    hasil = []
+    for m in _POLA_METODE.findall(pertanyaan):
+        if m.upper() not in _BUKAN_METODE and m not in hasil:
+            hasil.append(m)
+    return hasil[:3]
+
+
 def _pertanyaan_daftar(pertanyaan: str) -> bool:
     """Pertanyaan yang jawabannya berupa daftar item (sering ada di tabel)."""
     return bool(_POLA_DAFTAR.search(pertanyaan))
+
+
+# ---------------------------------------------------------------- jangkar entitas
+_POLA_PENUTUP = re.compile(r"\b(?:\d+\.?\s*)?(CONCLUSIONS?|Conclusions?|KESIMPULAN|Kesimpulan|PENUTUP)\b")
+_POLA_KUTIPAN = re.compile(r"et al\.?,?\s*\(?\d{4}|\(\w+[^()]{0,40}?\d{4}[a-z]?\)")
+MIN_KUTIPAN_RELATED_WORK = 3
+
+
+def _kelas_jangkar(c: dict, struktur: dict) -> int:
+    """0 = isi utama paruh pertama (biasanya bagian METODE: cara kerja dijelaskan di sini)
+    1 = isi lain: abstrak/pendahuluan (hal. 1-2), kesimpulan, eksperimen (paruh kedua isi),
+        atau related work (banyak kutipan "et al., 2023")
+    2 = referensi/lampiran, atau tabel yang isinya sebagian besar angka
+
+    Pelajaran dari tes pada paper asli: pencarian di dalam satu paper cenderung memilih
+    kesimpulan, related work, hasil eksperimen, lampiran, atau tabel TFLOPs, karena bagian itu
+    paling sering menyebut nama metode. Penjelasan cara kerjanya justru di bagian metode.
+    """
+    teks = c["teks"]
+    ref, tengah = struktur.get("mulai_referensi"), struktur.get("tengah_isi")
+    if ref is not None and c["urutan"] >= ref:
+        return 2
+    if teks.startswith("[TABEL]"):
+        isi = re.sub(r"\s", "", teks)
+        if sum(ch.isdigit() for ch in isi) / max(len(isi), 1) > 0.15:
+            return 2
+    if (c["halaman"] <= 2 or _POLA_PENUTUP.search(teks)
+            or len(_POLA_KUTIPAN.findall(teks)) >= MIN_KUTIPAN_RELATED_WORK
+            or (tengah is not None and c["urutan"] > tengah)):
+        return 1
+    return 0
+
+
+def _query_untuk(istilah: str, queries: list[str], semua_istilah: list[str], pertanyaan: str) -> list[str]:
+    """Query yang memuat istilah ini, dengan nama metode LAIN dihapus.
+
+    "difference between Self-RAG and CRAG ..." untuk paper Self-RAG menjadi
+    "difference between Self-RAG and ...": tanpa ini, bagian paper yang membandingkan kedua
+    metode (biasanya related work atau hasil) selalu menang.
+    """
+    hasil = []
+    for q in queries or [pertanyaan]:
+        if istilah.lower() not in q.lower():
+            continue
+        for lain in semua_istilah:
+            if lain != istilah:
+                q = re.sub(rf"(?<![\w-]){re.escape(lain)}(?![\w-])", " ", q, flags=re.IGNORECASE)
+        q = " ".join(q.split())
+        if q not in hasil:
+            hasil.append(q)
+    return hasil or [pertanyaan]
+
+
+def ambil_jangkar(pertanyaan: str, queries: list[str], user_id: str) -> list[dict]:
+    """Chunk terbaik dari paper asli setiap nama metode di pertanyaan (maks. 2 per metode)."""
+    jangkar: list[dict] = []
+    semua = _nama_metode(pertanyaan)
+    for istilah in semua:
+        paper = jurnal_untuk_istilah(istilah, user_id)
+        if not paper:
+            continue
+        calon = cari(_query_untuk(istilah, queries, semua, pertanyaan), user_id=user_id,
+                     top_k=CALON_JANGKAR, maks_per_jurnal=CALON_JANGKAR, paper_id=paper)
+        struktur = struktur_paper(user_id, paper)
+        # urutkan ulang: kelas dulu (bagian metode di depan), lalu peringkat pencarian
+        calon = sorted(enumerate(calon), key=lambda x: (_kelas_jangkar(x[1], struktur), x[0]))
+        ada = {_kunci(c) for c in jangkar}
+        jangkar += [{**c, "entitas": istilah} for _, c in calon if _kunci(c) not in ada][:JANGKAR_PER_ENTITAS]
+    return jangkar
+
+
+def _kerangka_perbandingan(jangkar: list[dict]) -> str:
+    """Kerangka jawaban untuk pertanyaan yang menyebut 2+ metode (mis. "Self-RAG vs CRAG").
+
+    Pelajaran dari tes: tanpa kerangka, model menulis 2-3 kalimat umum dan melewatkan detail
+    mekanisme (nama aksi/label/token) walau detail itu ada di konteks.
+    """
+    entitas: dict[str, str] = {}
+    for c in jangkar:
+        entitas.setdefault(c["entitas"], c["penulis"])
+    if len(entitas) < 2:
+        return ""
+    bagian = "\n".join(
+        f"{i}. **{nama}**: jelaskan cara kerjanya terkait pertanyaan, terutama dari sumber {penulis.rstrip('.')}. "
+        f"Sebutkan SEMUA nama token/label/aksi/kategori yang dipakai metode ini persis seperti di sumber."
+        for i, (nama, penulis) in enumerate(entitas.items(), start=1))
+    return (f"Susun jawaban dengan kerangka berikut:\n{bagian}\n"
+            f"{len(entitas) + 1}. **Perbedaan utama**: 2-3 poin singkat.\n\n")
 
 
 # ---------------------------------------------------------------- retrieve
@@ -115,13 +222,25 @@ def retrieve(state: ResearchState) -> dict:
         chunks = cari(queries, user_id=state["user_id"], top_k=KANDIDAT_RETRIEVE,
                       maks_per_jurnal=MAKS_PER_JURNAL_KANDIDAT)
         catatan = f"retrieve: {len(queries)} query -> {len(chunks)} kandidat"
+
+        # Retrieval sadar entitas: untuk setiap nama metode di pertanyaan, ambil chunk terbaik
+        # dari paper ASLI metode itu. Chunk ini jadi "jangkar" yang dijamin ikut ke Generate.
+        # Tanpa ini, "Self-RAG vs CRAG" selalu bersumber dari related-work paper CRAG.
+        jangkar = ambil_jangkar(state["question"], queries, state["user_id"])
+        if jangkar:
+            kunci_jangkar = {_kunci(c) for c in jangkar}
+            chunks = [*jangkar, *[c for c in chunks if _kunci(c) not in kunci_jangkar]]
+            halaman = ", ".join(f"{_nama_pendek(c)} hal. {c['halaman']}" for c in jangkar)
+            catatan += f" + {len(jangkar)} jangkar dari paper metode ({halaman})"
+
         # Pertanyaan daftar: tambahkan tabel terbaik secara pasti (tidak bergantung keputusan LLM)
         if _pertanyaan_daftar(state["question"]):
             ada = {_kunci(c) for c in chunks}
             tabel = [t for t in cari_tabel(queries, user_id=state["user_id"]) if _kunci(t) not in ada]
             chunks = [*tabel, *chunks]
             catatan += f" + {len(tabel)} tabel (pertanyaan daftar)"
-        return {"queries": queries, "chunks": chunks, "trace": _jejak(state, catatan)}
+        return {"queries": queries, "chunks": chunks, "jangkar": jangkar,
+                "trace": _jejak(state, catatan)}
 
     # Putaran ulang: pakai query hasil rewrite, dan lewati chunk yang sudah dinyatakan relevan
     queries = state.get("query_baru", [])
@@ -160,11 +279,34 @@ def grade(state: ResearchState) -> dict:
         return {"relevant": [*sebelumnya, *chunks][:MAKS_SUMBER_GENERATE],
                 "trace": _jejak(state, f"grade error ({e}; balasan: {cuplikan!r}) -> pakai semua")}
 
-    # gabungkan dengan hasil putaran sebelumnya (yang lama didahulukan)
-    gabung = [*sebelumnya, *relevant][:MAKS_SUMBER_GENERATE]
+    # Jangkar (chunk terbaik paper asli metode yang ditanyakan) dijamin ikut walau ditolak Grade:
+    # Grade sering menolaknya karena potongan 750 karakter belum menyebut "dokumen tidak relevan",
+    # padahal penjelasannya ada di chunk tetangga yang nanti ditambahkan context expansion.
+    dipaksa = []
+    if state.get("putaran", 0) == 0:
+        lolos = {_kunci(c) for c in relevant}
+        dipaksa = [c for c in state.get("jangkar", []) if _kunci(c) not in lolos]
+
+    # gabungkan: jangkar dulu, lalu hasil putaran sebelumnya, lalu yang baru lolos
+    gabung = _unik([*dipaksa, *sebelumnya, *relevant])[:MAKS_SUMBER_GENERATE]
     return {"relevant": gabung,
             "trace": _jejak(state, f"grade: {len(relevant)} dari {len(chunks)} relevan"
+                                   + (f" + {len(dipaksa)} jangkar dipaksa" if dipaksa else "")
                                    + (f" (total {len(gabung)})" if sebelumnya else ""))}
+
+
+def _nama_pendek(c: dict) -> str:
+    kata = (c.get("penulis") or "").split(",")[0].split("&")[0].split()
+    return kata[-1] if kata else "?"
+
+
+def _unik(chunks: list[dict]) -> list[dict]:
+    hasil, ada = [], set()
+    for c in chunks:
+        if _kunci(c) not in ada:
+            ada.add(_kunci(c))
+            hasil.append(c)
+    return hasil
 
 
 # ---------------------------------------------------------------- evaluasi + rewrite
@@ -251,7 +393,7 @@ def generate(state: ResearchState) -> dict:
     # Aturan sitasi diulang di AKHIR pesan: dengan konteks panjang, model lebih patuh
     # pada instruksi yang terakhir dibacanya.
     pesan = (f"Potongan jurnal:\n{konteks}\n\nPertanyaan: {state['question']}\n\n"
-             f"{prompts.PENGINGAT_SITASI}")
+             f"{_kerangka_perbandingan(state.get('jangkar', []))}{prompts.PENGINGAT_SITASI}")
     jawaban = _rapikan_sitasi(panggil_llm(pesan, peran="berat", system=prompts.GENERATE_SYSTEM,
                                           max_tokens=1200))
 

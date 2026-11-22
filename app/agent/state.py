@@ -16,6 +16,7 @@ class ResearchState(TypedDict, total=False):
     # hasil retrieve
     queries: list[str]       # variasi query yang dipakai mencari (EN/ID/sub-pertanyaan)
     chunks: list[dict]       # kandidat chunk dari Qdrant
+    jangkar: list[dict]      # chunk terbaik dari paper asli tiap metode yang ditanyakan (dijamin ikut)
 
     # hasil grade
     relevant: list[dict]     # chunk yang lolos penilaian relevansi (terakumulasi antar-putaran)

@@ -19,7 +19,7 @@ REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low")
 # Tes menunjukkan model ringan sering salah menilai relevansi, jadi default "berat".
 PERAN_GRADE = os.getenv("PERAN_GRADE", "berat")
 PERAN_EVALUASI = os.getenv("PERAN_EVALUASI", "berat")
-MODEL_CADANGAN_GEMINI = os.getenv("MODEL_CADANGAN_GEMINI", "gemini/gemini-2.5-flash-lite")
+MODEL_CADANGAN_GEMINI = os.getenv("MODEL_CADANGAN_GEMINI", "gemini/gemini-3.5-flash-lite")
 MODEL_CADANGAN_MISTRAL = os.getenv("MODEL_CADANGAN_MISTRAL", "mistral/mistral-small-latest")
 
 # Embedding & Qdrant

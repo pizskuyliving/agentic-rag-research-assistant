@@ -1,5 +1,33 @@
 # Catatan perubahan
 
+## Paket 9 — Jangkar entitas + cadangan Gemini 3.5 (22 Nov 2026)
+
+Tes #1 setelah Paket 8: 1/8 lalu 3/8. Diagnosa: aturan "tambah hanya jika < 3 kandidat" tidak memicu
+(paper Asai sudah muncul, tapi bagian yang lemah seperti lampiran hal. 20), lalu Grade menolak sebagian besar.
+
+| File | Perubahan |
+|---|---|
+| `app/agent/nodes.py` | Untuk tiap nama metode: SELALU ambil 2 chunk terbaik dari paper aslinya (query yang memuat nama metode itu) sebagai "jangkar"; jangkar dijamin lolos ke Generate walau ditolak Grade |
+| `app/agent/nodes.py` | `ambil_jangkar()`: 30 calon dari paper asli dengan query yang nama metode LAINNYA dihapus; urutkan ulang: bagian metode (paruh pertama isi) dulu; pendahuluan, related work (banyak kutipan), hasil, kesimpulan di belakang; referensi/lampiran/tabel angka paling akhir. Diuji pada PDF Self-RAG & CRAG asli (BM25): jangkar = Table 1 ISREL hal. 4 + hal. 4 (Asai), Algorithm 1 CRAG hal. 5 + hal. 3 (Yan) |
+| `app/ingestion/indexer.py` | `struktur_paper()`: posisi daftar pustaka (judul "REFERENCES" yang menempel di akhir kalimat) dan titik tengah isi |
+| `app/agent/nodes.py` | Pertanyaan dengan 2+ metode: Generate diberi kerangka (bagian per metode + perbedaan utama) dan diminta menyebut semua nama token/label/aksi. Tes #1: 5/8, jangkar sudah tepat tetapi jawaban hanya 2 kalimat |
+| `app/agent/state.py` | Field `jangkar` |
+| `scripts/cek_entitas.py` | Menampilkan chunk jangkar per metode (tanpa LLM) |
+| `app/config.py`, `.env.example` | Cadangan Gemini: `gemini-3.5-flash-lite` (2.5 tidak tersedia untuk pengguna baru) |
+
+## Paket 8 — Retrieval sadar entitas + penanganan kuota harian (22 Nov 2026)
+
+Eval `--ulang 2`: putaran 1 = 53/56 (94,6%); putaran 2 terhenti di #11 karena kuota HARIAN Groq (200 ribu token/model) habis.
+Satu-satunya soal yang konsisten gagal: #1 Self-RAG vs CRAG (5/8, 4/8): penjelasan Self-RAG selalu diambil dari paper CRAG hal. 8
+(yang membahas Self-RAG), bukan dari paper Self-RAG sendiri.
+
+| File | Perubahan |
+|---|---|
+| `app/agent/nodes.py` | Nama metode di pertanyaan (Self-RAG, CRAG, Adaptive-RAG, PPDB, ...) dicari paper "rumah"-nya; jika paper itu menyumbang < 3 kandidat, ambil chunk khusus dari paper itu |
+| `app/ingestion/indexer.py` | `cari(..., paper_id=...)` untuk pencarian di satu jurnal; `jurnal_untuk_istilah()`: dari judul, atau jurnal yang dominan menyebut istilah |
+| `app/llm.py` | `KuotaHarianHabis`: berhenti dengan pesan jelas saat kuota harian habis; saran tunggu terpendek dipakai; jeda yang dicetak = jeda sebenarnya |
+| `eval/run_eval.py` | Berhenti rapi saat kuota harian habis dan tetap mencetak rekap; putaran tidak lengkap tidak ikut dirata-rata |
+
 ## Paket 7 — Tabel + evaluasi pertanyaan daftar (22 Nov 2026)
 
 Evaluasi 15 soal sebelum paket ini: 48/56 (86%). Kegagalan terbesar #10 (jenis reflection token Self-RAG, 1/5):

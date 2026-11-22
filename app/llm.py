@@ -59,15 +59,26 @@ def _bangun_router() -> Router:
 _router = None
 
 
+class KuotaHarianHabis(RuntimeError):
+    """Kuota token HARIAN penyedia LLM habis. Menunggu beberapa detik tidak akan membantu."""
+
+
 def _detik_tunggu(err: Exception) -> float | None:
-    """Ambil saran tunggu dari pesan 429, mis. 'Please try again in 12.945s'."""
+    """Ambil saran tunggu dari pesan 429, mis. 'Please try again in 12.945s'.
+    Pesan error bisa memuat beberapa error sekaligus (model utama + cadangan);
+    yang dipakai adalah saran tunggu TERPENDEK."""
     teks = str(err)
-    if "rate_limit" not in teks and "429" not in teks and "RateLimit" not in type(err).__name__:
+    tanda = ("rate_limit", "Rate limit", "RateLimit", "429")
+    if not any(t in teks for t in tanda) and "RateLimit" not in type(err).__name__:
         return None
-    m = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", teks)
-    if not m:
-        return 15.0
-    return int(m.group(1) or 0) * 60 + float(m.group(2)) + 1.0
+    saran = [int(m or 0) * 60 + float(s) + 1.0
+             for m, s in re.findall(r"try again in (?:(\d+)m)?([\d.]+)s", teks)]
+    return min(saran) if saran else 15.0
+
+
+def _kuota_harian(err: Exception) -> bool:
+    teks = str(err)
+    return "tokens per day" in teks or "(TPD)" in teks or "requests per day" in teks or "(RPD)" in teks
 
 
 def _completion(peran: str, **kwargs):
@@ -82,10 +93,18 @@ def _completion(peran: str, **kwargs):
             return _router.completion(model=peran, **kwargs)
         except Exception as e:
             tunggu = _detik_tunggu(e)
+            harian = _kuota_harian(e)
+            # kuota harian habis: menunggu sebentar tidak membantu; atau sudah dicoba berkali-kali
+            if harian and tunggu is not None and (tunggu > 70 or percobaan == MAKS_COBA_ULANG):
+                raise KuotaHarianHabis(
+                    "Kuota token HARIAN semua model sudah habis (model utama dan cadangan). "
+                    f"Coba lagi sekitar {tunggu / 60:.0f} menit lagi, atau isi GEMINI_API_KEY / "
+                    "MISTRAL_API_KEY di .env sebagai cadangan.") from None
             if tunggu is None or percobaan == MAKS_COBA_ULANG:
                 raise
-            print(f"   (kuota per menit penuh, menunggu {tunggu:.0f} detik...)")
-            time.sleep(min(tunggu, 65))
+            jeda = min(tunggu, 65)
+            print(f"   (kuota per menit penuh, menunggu {jeda:.0f} detik...)")
+            time.sleep(jeda)
 
 
 def panggil_llm(prompt: str, peran: str = "berat", system: str | None = None,
