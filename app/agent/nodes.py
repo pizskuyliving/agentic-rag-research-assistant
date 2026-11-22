@@ -5,7 +5,7 @@ import re
 from app import config
 from app.agent import prompts
 from app.agent.state import ResearchState
-from app.ingestion.indexer import ambil_chunk, cari
+from app.ingestion.indexer import ambil_chunk, cari, cari_tabel
 from app.llm import panggil_llm
 from app.query import variasi_query
 
@@ -97,6 +97,16 @@ def _kunci(c: dict) -> tuple:
     return (c["paper_id"], c["urutan"])
 
 
+_POLA_DAFTAR = re.compile(
+    r"\b(apa saja|sebutkan|jenis|macam|komponen|tahapan|langkah-langkah|daftar|"
+    r"what are|which|types? of|kinds? of|list|components?|steps)\b", re.IGNORECASE)
+
+
+def _pertanyaan_daftar(pertanyaan: str) -> bool:
+    """Pertanyaan yang jawabannya berupa daftar item (sering ada di tabel)."""
+    return bool(_POLA_DAFTAR.search(pertanyaan))
+
+
 # ---------------------------------------------------------------- retrieve
 def retrieve(state: ResearchState) -> dict:
     putaran = state.get("putaran", 0)
@@ -104,8 +114,14 @@ def retrieve(state: ResearchState) -> dict:
         queries = variasi_query(state["question"])
         chunks = cari(queries, user_id=state["user_id"], top_k=KANDIDAT_RETRIEVE,
                       maks_per_jurnal=MAKS_PER_JURNAL_KANDIDAT)
-        return {"queries": queries, "chunks": chunks,
-                "trace": _jejak(state, f"retrieve: {len(queries)} query -> {len(chunks)} kandidat")}
+        catatan = f"retrieve: {len(queries)} query -> {len(chunks)} kandidat"
+        # Pertanyaan daftar: tambahkan tabel terbaik secara pasti (tidak bergantung keputusan LLM)
+        if _pertanyaan_daftar(state["question"]):
+            ada = {_kunci(c) for c in chunks}
+            tabel = [t for t in cari_tabel(queries, user_id=state["user_id"]) if _kunci(t) not in ada]
+            chunks = [*tabel, *chunks]
+            catatan += f" + {len(tabel)} tabel (pertanyaan daftar)"
+        return {"queries": queries, "chunks": chunks, "trace": _jejak(state, catatan)}
 
     # Putaran ulang: pakai query hasil rewrite, dan lewati chunk yang sudah dinyatakan relevan
     queries = state.get("query_baru", [])

@@ -20,17 +20,28 @@ which what how why their these those using use used than into such can not we ou
 """.split())
 
 
+def _tunggal(kata: str) -> str:
+    """Penyamaan bentuk jamak bahasa Inggris yang sederhana: tokens -> token, types -> type.
+    Sengaja minimal (tanpa stemmer) agar istilah teknis tidak rusak."""
+    if len(kata) > 4 and kata.endswith("ies"):
+        return kata[:-3] + "y"
+    if len(kata) > 3 and kata.endswith("s") and not kata.endswith(("ss", "us", "is")):
+        return kata[:-1]
+    return kata
+
+
 def tokenisasi(teks: str) -> list[str]:
     """Huruf kecil, pisah per kata. Istilah bertanda hubung disimpan utuh DAN per bagian:
-    'Self-RAG' -> ['self-rag', 'self', 'rag'] supaya cocok dengan penulisan apa pun."""
+    'Self-RAG' -> ['self-rag', 'self', 'rag'] supaya cocok dengan penulisan apa pun.
+    Bentuk jamak disamakan: 'tokens' dan 'token' dianggap kata yang sama."""
     teks = re.sub(r"[‐-―−]", "-", teks.lower())
     token = []
     for kata in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", teks):
         if "-" in kata:
             token.append(kata)
-            token.extend(k for k in kata.split("-") if k and k not in STOPWORDS)
+            token.extend(_tunggal(k) for k in kata.split("-") if k and k not in STOPWORDS)
         elif kata not in STOPWORDS and len(kata) > 1:
-            token.append(kata)
+            token.append(_tunggal(kata))
     return token
 
 

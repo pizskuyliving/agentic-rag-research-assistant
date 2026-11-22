@@ -58,6 +58,8 @@ def main() -> None:
     ap.add_argument("--user", required=True)
     ap.add_argument("--soal", default="",
                     help="jalankan soal tertentu saja, mis. --soal 5,6,7 (nomor mulai dari 1)")
+    ap.add_argument("--ulang", type=int, default=1,
+                    help="jalankan seluruh soal N kali lalu rata-ratakan (LLM tidak selalu konsisten)")
     ap.add_argument("--jeda", type=int, default=30,
                     help="detik jeda antar soal, agar kuota token per menit Groq gratis tidak habis")
     args = ap.parse_args()
@@ -66,6 +68,25 @@ def main() -> None:
     semua_soal = [json.loads(b) for b in FILE_SOAL.read_text(encoding="utf-8").splitlines() if b.strip()]
     daftar = [(n, s) for n, s in enumerate(semua_soal, start=1) if not pilihan or n in pilihan]
 
+    semua_rekap = []
+    for putaran in range(1, args.ulang + 1):
+        if args.ulang > 1:
+            print(f"\n{'#' * 30} PUTARAN {putaran}/{args.ulang} {'#' * 30}")
+        semua_rekap.append(_jalankan(daftar, args))
+
+    if args.ulang > 1:
+        print("=" * 90)
+        print(f"RATA-RATA {args.ulang} PUTARAN")
+        for idx, (nomor, jenis, _, n) in enumerate(semua_rekap[0]):
+            nilai_soal = [r[idx][2] for r in semua_rekap]
+            print(f"  #{nomor:<3} {'/'.join(map(str, nilai_soal))} dari {n}  {jenis}")
+        totals = [sum(x[2] for x in r) for r in semua_rekap]
+        maks = sum(x[3] for x in semua_rekap[0])
+        rata = sum(totals) / len(totals)
+        print(f"TOTAL per putaran: {totals} dari {maks} | rata-rata {rata:.1f}/{maks} = {100 * rata / maks:.1f}%")
+
+
+def _jalankan(daftar: list, args) -> list:
     total_lulus = total_cek = 0
     rekap = []
     for i, (nomor, soal) in enumerate(daftar):
@@ -97,7 +118,8 @@ def main() -> None:
     print("REKAP")
     for nomor, jenis, lulus, n in rekap:
         print(f"  #{nomor:<3} {lulus}/{n}  {jenis}")
-    print(f"TOTAL skor otomatis: {total_lulus}/{total_cek}")
+    print(f"TOTAL skor otomatis: {total_lulus}/{total_cek} = {100 * total_lulus / max(total_cek, 1):.1f}%")
+    return rekap
 
 
 if __name__ == "__main__":

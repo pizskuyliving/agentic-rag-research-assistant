@@ -1,5 +1,25 @@
 # Catatan perubahan
 
+## Paket 7 — Tabel + evaluasi pertanyaan daftar (22 Nov 2026)
+
+Evaluasi 15 soal sebelum paket ini: 48/56 (86%). Kegagalan terbesar #10 (jenis reflection token Self-RAG, 1/5):
+rinciannya ada di Tabel 1 hal. 4 yang tidak pernah terambil, dan Evaluasi puas dengan jawaban kategori umum.
+
+| File | Perubahan |
+|---|---|
+| `app/ingestion/pdf_parser.py` | Deteksi tabel per halaman (`find_tables`), simpan sebagai markdown + judul ("Table 1: ..."); `--tabel` untuk pratinjau |
+| `app/ingestion/chunker.py` | Tabel = chunk `[TABEL]` tersendiri setelah teks halamannya; tabel besar dipecah per baris dengan header diulang |
+| `app/ingestion/indexer.py` | Ingest ulang menghapus chunk lama jurnal itu dulu (nomor urut bisa bergeser) |
+| `app/agent/prompts.py` | Grade: tabel berisi jawaban = relevan. Evaluasi: pertanyaan daftar cukup hanya jika item disebut spesifik |
+| `eval/run_eval.py` | `--ulang N`: rata-rata beberapa putaran; persentase ditampilkan |
+
+**Wajib ingest ulang** setelah paket ini.
+
+Revisi 7b: tabel diambil sebagai teks biasa dari area tabel + wajib ada judul "Table N" (versi grid memotong kata).
+Revisi 7c: pertanyaan daftar ("apa saja", "jenis", "types of") otomatis juga mencari di chunk tabel (BM25 khusus
+tabel, `cari_tabel()`); BM25 menyamakan bentuk jamak (tokens = token). Evaluasi LLM mengabaikan aturan daftar di
+prompt, jadi diganti logika pasti. docker-compose memakai volume Docker (bind mount ke D:\ error I/O di Windows).
+
 ## Paket 6 — Cek sitasi deterministik (20 Nov 2026)
 
 Evaluasi setelah context expansion: total 13/19 (tertinggi), TAPI dua jawaban tanpa sitasi sama sekali

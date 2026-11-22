@@ -36,6 +36,24 @@ def _potong_teks(teks: str, ukuran: int, overlap: int) -> list[str]:
     return hasil
 
 
+def _potong_tabel(tabel: str, maks: int) -> list[str]:
+    """Tabel kecil = satu chunk utuh. Tabel besar dipecah per kelompok baris,
+    dengan judul + header kolom diulang di setiap potongan agar tetap bisa dibaca."""
+    if len(tabel) <= maks:
+        return [tabel]
+    baris = tabel.splitlines()
+    kepala = baris[:3]               # "[TABEL] judul", header kolom, garis pemisah markdown
+    hasil, sekarang = [], []
+    for b in baris[3:]:
+        if sekarang and len("\n".join(kepala + sekarang + [b])) > maks:
+            hasil.append("\n".join(kepala + sekarang))
+            sekarang = []
+        sekarang.append(b)
+    if sekarang:
+        hasil.append("\n".join(kepala + sekarang))
+    return hasil
+
+
 def potong_jurnal(jurnal: Jurnal, ukuran: int = config.CHUNK_SIZE,
                   overlap: int = config.CHUNK_OVERLAP) -> list[Chunk]:
     chunks, urutan = [], 0
@@ -45,4 +63,10 @@ def potong_jurnal(jurnal: Jurnal, ukuran: int = config.CHUNK_SIZE,
                 continue
             chunks.append(Chunk(paper_id=jurnal.paper_id, urutan=urutan, halaman=hal.nomor, teks=teks))
             urutan += 1
+        # Tabel disimpan sebagai chunk tersendiri, tepat setelah teks halamannya
+        # (jadi ikut terbawa oleh context expansion sebagai "tetangga").
+        for tabel in getattr(hal, "tabel", []):
+            for bagian in _potong_tabel(tabel, ukuran * 2):
+                chunks.append(Chunk(paper_id=jurnal.paper_id, urutan=urutan, halaman=hal.nomor, teks=bagian))
+                urutan += 1
     return chunks

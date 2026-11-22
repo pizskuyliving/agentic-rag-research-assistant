@@ -38,7 +38,9 @@ Pertanyaan: """
 GRADE = """Kamu menilai relevansi potongan jurnal untuk sebuah pertanyaan.
 Sebuah potongan RELEVAN jika isinya membantu menjawab pertanyaan secara langsung:
 - menjelaskan CARA KERJA / MEKANISME / KOMPONEN dari metode atau sistem yang ditanyakan, ATAU
-- memuat fakta, hasil, atau temuan yang ditanyakan.
+- memuat fakta, hasil, atau temuan yang ditanyakan, ATAU
+- berupa tabel ([TABEL]) yang daftar/definisi/angkanya menjawab pertanyaan
+  (tabel sering memuat rincian yang tidak ditulis di paragraf).
 TIDAK relevan: daftar isi, daftar pustaka, detail teknis evaluasi/eksperimen yang tidak
 ditanyakan, atau kemiripan topik umum saja.
 Jika pertanyaan menyebut penelitian atau sistem tertentu, potongan dari penelitian lain TIDAK relevan.
@@ -63,6 +65,11 @@ Langkah:
    dalam X": cara kerja A untuk X, dan cara kerja B untuk X).
 2. Untuk setiap aspek, nilai apakah potongan di atas sudah MENJELASKANNYA secara langsung
    (bukan sekadar menyebut namanya).
+   Khusus pertanyaan DAFTAR ("apa saja", "sebutkan", "jenis-jenis", "komponen apa"):
+   cukup HANYA jika setiap item disebut dengan nama spesifiknya. Jika potongan hanya
+   menyebut kategori umum (mis. "dua jenis: X dan Y") padahal kategori itu punya sub-jenis
+   bernama, anggap BELUM cukup dan cari rinciannya (sering ada di tabel: tambahkan kata
+   "table" pada query baru).
 3. Jika ada aspek yang belum terjelaskan, tulis 1-3 query pencarian baru berbahasa Inggris
    untuk menemukan penjelasannya. GUNAKAN ISTILAH YANG MUNCUL DI POTONGAN DI ATAS
    (nama komponen, nama modul, nama algoritma yang disebut tapi belum dijelaskan),
