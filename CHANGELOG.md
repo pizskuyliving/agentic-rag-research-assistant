@@ -9,6 +9,9 @@
 | `.streamlit/config.toml` | Batas unggahan 20 MB |
 | `streamlit_app.py` | Pertanyaan disimpan bersama jawabannya: tidak lagi muncul dua kali jika proses sempat terputus |
 | `app/ingestion/indexer.py` | `daftar_jurnal()` dan `hapus_jurnal()` untuk UI |
+| `app/agent/nodes.py` | Pertanyaan daftar ("jurnal mana saja..."): Generate diberi daftar periksa semua jurnal yang lolos Grade. Tes #14: abstrak Fiidin lolos Grade tapi tidak disebut di jawaban |
+| `app/ingestion/indexer.py` | Chunk daftar pustaka tidak lagi ikut kandidat (dikenali dari 3+ entri "tahun." per chunk; diuji pada 6 PDF). Tes #14: 6 dari 9 kandidat adalah daftar pustaka |
+| `app/llm.py` | Balasan LLM kosong dicoba ulang dengan max_tokens 3x. Tes #14: Grade kosong -> semua kandidat lolos tanpa disaring, sumber Fiidin terpotong |
 | `app/llm.py`, `app/config.py`, `.env.example` | Cadangan baru: Cloudflare Workers AI dan Fireworks AI (keduanya gpt-oss-120b). Urutan: NVIDIA, Groq, Cloudflare, Fireworks, Gemini, Mistral |
 | `app/llm.py` | Model yang gagal setelah semua percobaan dilewati 3 menit (tidak dicoba ulang di setiap panggilan); pesan error ditampilkan singkat |
 | `app/llm.py` | Urutan model diatur sendiri: 429 per menit / error server -> tunggu & ulangi model yang SAMA; kuota harian -> tandai habis lalu pindah. Tes: kuota harian Gemini (500 permintaan) habis karena fallback seketika setiap NVIDIA kena batas 40/menit |

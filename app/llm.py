@@ -177,9 +177,16 @@ def panggil_llm(prompt: str, peran: str = "berat", system: str | None = None,
     if json_mode:
         extra["response_format"] = {"type": "json_object"}
 
-    resp = _completion(peran, messages=messages, temperature=temperature,
-                       max_tokens=max(max_tokens, MIN_MAX_TOKENS), **extra)
-    return resp.choices[0].message.content or ""
+    batas = max(max_tokens, MIN_MAX_TOKENS)
+    resp = _completion(peran, messages=messages, temperature=temperature, max_tokens=batas, **extra)
+    teks = resp.choices[0].message.content or ""
+    if not teks.strip():
+        # Balasan kosong: biasanya model reasoning menghabiskan max_tokens untuk "berpikir"
+        # (penyedia seperti NVIDIA/Cloudflare mengabaikan reasoning_effort=low). Coba sekali
+        # lagi dengan ruang 3x lebih besar. Tes: Grade kosong -> semua kandidat lolos tanpa disaring.
+        resp = _completion(peran, messages=messages, temperature=temperature, max_tokens=batas * 3, **extra)
+        teks = resp.choices[0].message.content or ""
+    return teks
 
 
 if __name__ == "__main__":

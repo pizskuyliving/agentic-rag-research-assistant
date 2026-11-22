@@ -105,7 +105,7 @@ def _kunci(c: dict) -> tuple:
 
 
 _POLA_DAFTAR = re.compile(
-    r"\b(apa saja|sebutkan|jenis|macam|komponen|tahapan|langkah-langkah|daftar|"
+    r"\b(apa saja|mana saja|sebutkan|jenis|macam|komponen|tahapan|langkah-langkah|daftar|"
     r"what are|which|types? of|kinds? of|list|components?|steps)\b", re.IGNORECASE)
 
 
@@ -195,6 +195,25 @@ def ambil_jangkar(pertanyaan: str, queries: list[str], user_id: str) -> list[dic
         ada = {_kunci(c) for c in jangkar}
         jangkar += [{**c, "entitas": istilah} for _, c in calon if _kunci(c) not in ada][:JANGKAR_PER_ENTITAS]
     return jangkar
+
+
+def _kerangka_daftar(pertanyaan: str, relevant: list[dict]) -> str:
+    """Untuk pertanyaan daftar ("jurnal mana saja yang ..."): daftar periksa semua jurnal yang
+    potongannya lolos Grade, supaya tidak ada yang terlewat.
+
+    Pelajaran dari tes #14: potongan abstrak Fiidin yang menyebut BM25 sudah lolos Grade dan ada
+    di konteks, tetapi model tetap tidak menyebut jurnal itu dalam daftar jawabannya.
+    """
+    if not _pertanyaan_daftar(pertanyaan):
+        return ""
+    jurnal: dict[str, str] = {}
+    for c in relevant:
+        jurnal.setdefault(c["paper_id"], f"{c['penulis']} ({c['tahun']}): {c['judul'][:90]}")
+    if len(jurnal) < 2:
+        return ""
+    daftar = "\n".join(f"- {j}" for j in jurnal.values())
+    return ("Ini pertanyaan DAFTAR. Periksa jurnal berikut SATU PER SATU dan masukkan setiap jurnal yang "
+            f"potongannya menjawab pertanyaan; jangan ada yang terlewat:\n{daftar}\n\n")
 
 
 def _kerangka_perbandingan(jangkar: list[dict]) -> str:
@@ -429,7 +448,8 @@ def generate(state: ResearchState) -> dict:
     # Aturan sitasi diulang di AKHIR pesan: dengan konteks panjang, model lebih patuh
     # pada instruksi yang terakhir dibacanya.
     pesan = (f"Potongan jurnal:\n{konteks}\n\nPertanyaan: {state['question']}\n\n"
-             f"{_kerangka_perbandingan(state.get('jangkar', []))}{prompts.PENGINGAT_SITASI}")
+             f"{_kerangka_perbandingan(state.get('jangkar', []))}"
+             f"{_kerangka_daftar(state['question'], state['relevant'])}{prompts.PENGINGAT_SITASI}")
     jawaban = _rapikan_sitasi(panggil_llm(pesan, peran="berat", system=prompts.GENERATE_SYSTEM,
                                           max_tokens=1200))
 

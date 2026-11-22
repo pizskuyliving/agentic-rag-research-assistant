@@ -274,6 +274,22 @@ def struktur_paper(user_id: str, paper_id: str) -> dict:
 RRF_K = 60  # konstanta standar Reciprocal Rank Fusion
 
 
+# Tahun yang diikuti titik, khas entri daftar pustaka: "(2024). Judul", "arXiv:2305.1, 2023." ,
+# "2023. Active retrieval". Sitasi di badan teks ("(Darmawan et al., 2023)") tidak cocok.
+_POLA_TAHUN_REFERENSI = re.compile(r"(?:\((?:19|20)\d{2}[a-z]?\)\.|\b(?:19|20)\d{2}[a-z]?\.(?=\s|$))")
+
+
+def _daftar_pustaka(teks: str) -> bool:
+    """Chunk yang isinya daftar pustaka (deretan referensi), bukan isi paper.
+
+    Daftar pustaka menyebut banyak istilah (mis. "BM25" di judul paper yang dikutip) tanpa
+    menjelaskan apa pun, sehingga sering menang pencarian kata kunci. Tes: pertanyaan "paper mana
+    yang memakai BM25" menarik 6 chunk daftar pustaka Gao, Lewis, Asai. Diuji pada 6 PDF:
+    hanya halaman daftar pustaka yang tertandai (3+ entri bertahun dalam satu chunk).
+    """
+    return len(_POLA_TAHUN_REFERENSI.findall(teks)) >= 3
+
+
 def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
          maks_per_jurnal: int = 2, paper_id: str | None = None) -> list[dict]:
     """Hybrid search: vektor (makna) + BM25 (kata kunci), HANYA dari jurnal milik user_id.
@@ -299,6 +315,8 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
     rrf: dict[tuple, float] = {}
 
     def tambah(item: dict, peringkat: int) -> None:
+        if _daftar_pustaka(item.get("teks", "")):
+            return
         kunci = (item["paper_id"], item["urutan"])
         if kunci not in data:
             data[kunci] = {**item, "skor": item.get("skor", 0.0)}
@@ -319,6 +337,7 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
             teratas = [i for i, _ in bm25.cari(q, limit=per_daftar)]
         for peringkat, i in enumerate(teratas, start=1):
             tambah(dokumen[i], peringkat)
+        teratas = [i for i in teratas if not _daftar_pustaka(dokumen[i]["teks"])]
         if teratas:
             k = (dokumen[teratas[0]]["paper_id"], dokumen[teratas[0]]["urutan"])
             if k not in juara:
