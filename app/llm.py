@@ -13,7 +13,7 @@ ikut dihitung dalam max_tokens. Karena itu:
 - max_tokens tidak boleh terlalu kecil, kalau tidak jawaban bisa kosong
 
 Jika kena batas kuota per menit (429), panggilan menunggu sesuai saran server lalu
-mencoba lagi. Jika tetap gagal, litellm pindah ke cadangan (Gemini/Mistral) bila diisi.
+mencoba lagi. Jika tetap gagal, litellm pindah ke cadangan (NVIDIA/Gemini/Mistral) bila diisi.
 """
 import re
 import time
@@ -32,22 +32,35 @@ MIN_MAX_TOKENS = 600
 MAKS_COBA_ULANG = 3
 
 
-def _bangun_router() -> Router:
-    model_list = [
-        {"model_name": "ringan", "litellm_params": {"model": config.MODEL_RINGAN, "api_key": config.GROQ_API_KEY}},
-        {"model_name": "berat", "litellm_params": {"model": config.MODEL_BERAT, "api_key": config.GROQ_API_KEY}},
-    ]
-    cadangan = []
-    if config.GEMINI_API_KEY:
-        model_list.append({"model_name": "cadangan-gemini",
-                           "litellm_params": {"model": config.MODEL_CADANGAN_GEMINI, "api_key": config.GEMINI_API_KEY}})
-        cadangan.append("cadangan-gemini")
-    if config.MISTRAL_API_KEY:
-        model_list.append({"model_name": "cadangan-mistral",
-                           "litellm_params": {"model": config.MODEL_CADANGAN_MISTRAL, "api_key": config.MISTRAL_API_KEY}})
-        cadangan.append("cadangan-mistral")
+def _key_untuk(model: str) -> str:
+    """API key sesuai penyedia di awalan nama model (groq/..., nvidia_nim/..., gemini/...)."""
+    awalan = model.split("/", 1)[0]
+    return {"groq": config.GROQ_API_KEY, "nvidia_nim": config.NVIDIA_API_KEY,
+            "gemini": config.GEMINI_API_KEY, "mistral": config.MISTRAL_API_KEY}.get(awalan, "")
 
-    # Kuota Groq dihitung per model, jadi model Groq lain bisa jadi cadangan.
+
+def _bangun_router() -> Router:
+    """Model utama dari MODEL_RINGAN / MODEL_BERAT (penyedia mana pun), lalu cadangan
+    berurutan: NVIDIA (model sama gpt-oss-120b), Groq, Gemini, Mistral, yang key-nya diisi.
+    Cadangan yang sama persis dengan model utama dilewati."""
+    model_list = [
+        {"model_name": "ringan", "litellm_params": {"model": config.MODEL_RINGAN,
+                                                    "api_key": _key_untuk(config.MODEL_RINGAN)}},
+        {"model_name": "berat", "litellm_params": {"model": config.MODEL_BERAT,
+                                                   "api_key": _key_untuk(config.MODEL_BERAT)}},
+    ]
+    utama = {config.MODEL_RINGAN, config.MODEL_BERAT}
+    cadangan = []
+    for nama, model in [("cadangan-nvidia", config.MODEL_CADANGAN_NVIDIA),
+                        ("cadangan-groq", config.MODEL_CADANGAN_GROQ),
+                        ("cadangan-gemini", config.MODEL_CADANGAN_GEMINI),
+                        ("cadangan-mistral", config.MODEL_CADANGAN_MISTRAL)]:
+        if model and model not in utama and _key_untuk(model):
+            model_list.append({"model_name": nama,
+                               "litellm_params": {"model": model, "api_key": _key_untuk(model)}})
+            cadangan.append(nama)
+
+    # Kuota dihitung per model, jadi model utama yang lain juga bisa jadi cadangan.
     fallbacks = [
         {"ringan": ["berat", *cadangan]},
         {"berat": [*cadangan, "ringan"]},
@@ -94,12 +107,19 @@ def _completion(peran: str, **kwargs):
         except Exception as e:
             tunggu = _detik_tunggu(e)
             harian = _kuota_harian(e)
+            # Groq habis kuota harian, TAPI cadangan hanya sibuk sementara (mis. Gemini 503
+            # "high demand"): tunggu sebentar lalu coba lagi, jangan langsung menyerah.
+            sementara = any(t in str(e) for t in ("503", "UNAVAILABLE", "high demand", "overloaded"))
+            if harian and sementara and percobaan < MAKS_COBA_ULANG:
+                print("   (kuota Groq habis dan model cadangan sedang sibuk, menunggu 20 detik...)")
+                time.sleep(20)
+                continue
             # kuota harian habis: menunggu sebentar tidak membantu; atau sudah dicoba berkali-kali
             if harian and tunggu is not None and (tunggu > 70 or percobaan == MAKS_COBA_ULANG):
                 raise KuotaHarianHabis(
                     "Kuota token HARIAN semua model sudah habis (model utama dan cadangan). "
-                    f"Coba lagi sekitar {tunggu / 60:.0f} menit lagi, atau isi GEMINI_API_KEY / "
-                    "MISTRAL_API_KEY di .env sebagai cadangan.") from None
+                    f"Coba lagi sekitar {tunggu / 60:.0f} menit lagi, atau isi NVIDIA_API_KEY / "
+                    "GEMINI_API_KEY di .env sebagai cadangan.") from None
             if tunggu is None or percobaan == MAKS_COBA_ULANG:
                 raise
             jeda = min(tunggu, 65)

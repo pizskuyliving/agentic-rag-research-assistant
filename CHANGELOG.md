@@ -13,6 +13,9 @@ Tes #1 setelah Paket 8: 1/8 lalu 3/8. Diagnosa: aturan "tambah hanya jika < 3 ka
 | `app/agent/nodes.py` | Pertanyaan dengan 2+ metode: Generate diberi kerangka (bagian per metode + perbedaan utama) dan diminta menyebut semua nama token/label/aksi. Tes #1: 5/8, jangkar sudah tepat tetapi jawaban hanya 2 kalimat |
 | `app/agent/state.py` | Field `jangkar` |
 | `scripts/cek_entitas.py` | Menampilkan chunk jangkar per metode (tanpa LLM) |
+| `app/llm.py`, `app/config.py` | Model utama boleh dari penyedia mana pun: API key dipilih dari awalan nama model (`groq/`, `nvidia_nim/`, `gemini/`, `mistral/`). Groq bisa jadi cadangan saat NVIDIA dipakai sebagai utama |
+| `app/llm.py` | Jika Groq habis kuota harian dan cadangan hanya sibuk sementara (503), tunggu 20 detik dan coba lagi (maks. 3x), tidak langsung berhenti |
+| `app/config.py`, `app/llm.py`, `.env.example` | Cadangan NVIDIA (`nvidia_nim/openai/gpt-oss-120b`, model sama dengan Groq) dipakai pertama, lalu Gemini, lalu Mistral |
 | `app/config.py`, `.env.example` | Cadangan Gemini: `gemini-3.5-flash-lite` (2.5 tidak tersedia untuk pengguna baru) |
 
 ## Paket 8 — Retrieval sadar entitas + penanganan kuota harian (22 Nov 2026)
