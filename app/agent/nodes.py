@@ -5,7 +5,9 @@ import re
 from app import config
 from app.agent import prompts
 from app.agent.state import ResearchState
-from app.ingestion.indexer import ambil_chunk, cari, cari_tabel, jurnal_untuk_istilah, struktur_paper
+from app.ingestion.indexer import (ambil_chunk, cari, cari_tabel, jumlah_jurnal, jurnal_untuk_istilah,
+                                  struktur_paper)
+from app.ingestion.bm25 import tokenisasi
 from app.llm import panggil_llm
 from app.query import variasi_query
 
@@ -15,7 +17,7 @@ KANDIDAT_RETRIEVE = 12
 # Maksimal chunk per jurnal di daftar kandidat (3 terbukti memotong bagian metode)
 MAKS_PER_JURNAL_KANDIDAT = 5
 # Panjang maksimum tiap chunk saat dinilai Grade (hemat token, tapi cukup untuk melihat isinya)
-POTONG_UNTUK_GRADE = 750
+POTONG_UNTUK_GRADE = 1200  # = ukuran chunk: Grade melihat chunk utuh (750 terbukti memotong bagian penting)
 # Panjang cuplikan chunk saat Evaluasi memeriksa kecukupan
 POTONG_UNTUK_EVALUASI = 500
 # Berapa kali boleh mencari ulang (rewrite). 1 = maksimal dua kali pencarian per pertanyaan.
@@ -214,13 +216,27 @@ def _kerangka_perbandingan(jangkar: list[dict]) -> str:
             f"{len(entitas) + 1}. **Perbedaan utama**: 2-3 poin singkat.\n\n")
 
 
+def _batas_per_jurnal(user_id: str) -> int:
+    """Batas kandidat per jurnal, menyesuaikan ukuran koleksi.
+
+    Batas 5 per jurnal mencegah satu jurnal menguasai hasil saat koleksinya banyak. Tapi pada
+    koleksi berisi 1-2 jurnal, batas itu membuat kandidat hanya 5 dari 12 yang diminta, dan
+    bagian yang dicari (mis. positional encoding di hal. 6) bisa tidak terambil sama sekali.
+    """
+    try:
+        n = jumlah_jurnal(user_id)
+    except Exception:
+        return MAKS_PER_JURNAL_KANDIDAT
+    return max(MAKS_PER_JURNAL_KANDIDAT, -(-KANDIDAT_RETRIEVE // max(n, 1)))
+
+
 # ---------------------------------------------------------------- retrieve
 def retrieve(state: ResearchState) -> dict:
     putaran = state.get("putaran", 0)
     if putaran == 0:
         queries = variasi_query(state["question"])
         chunks = cari(queries, user_id=state["user_id"], top_k=KANDIDAT_RETRIEVE,
-                      maks_per_jurnal=MAKS_PER_JURNAL_KANDIDAT)
+                      maks_per_jurnal=_batas_per_jurnal(state["user_id"]))
         catatan = f"retrieve: {len(queries)} query -> {len(chunks)} kandidat"
 
         # Retrieval sadar entitas: untuk setiap nama metode di pertanyaan, ambil chunk terbaik
@@ -246,21 +262,41 @@ def retrieve(state: ResearchState) -> dict:
     queries = state.get("query_baru", [])
     sudah = {_kunci(c) for c in state.get("relevant", [])}
     chunks = [c for c in cari(queries, user_id=state["user_id"], top_k=KANDIDAT_RETRIEVE,
-                              maks_per_jurnal=MAKS_PER_JURNAL_KANDIDAT) if _kunci(c) not in sudah]
+                              maks_per_jurnal=_batas_per_jurnal(state["user_id"])) if _kunci(c) not in sudah]
     return {"queries": [*state.get("queries", []), *queries], "chunks": chunks,
             "trace": _jejak(state, f"retrieve ulang #{putaran}: {len(queries)} query baru -> "
                                    f"{len(chunks)} kandidat baru")}
 
 
 # ---------------------------------------------------------------- grade
+def _cuplikan_terbaik(teks: str, kata: set[str], panjang: int = POTONG_UNTUK_GRADE) -> str:
+    """Bagian chunk (sepanjang `panjang`) yang paling banyak memuat kata dari pertanyaan/query.
+
+    Grade hanya melihat potongan pendek supaya hemat token. Dulu yang dikirim selalu awal chunk,
+    padahal satu chunk bisa berisi sisa tabel lalu awal bagian baru (mis. "Table 1 ..." lalu
+    "3.5 Positional Encoding"). Bagian yang relevan jadi terpotong dan chunk ditolak.
+    """
+    if len(teks) <= panjang or not kata:
+        return teks[:panjang]
+    terbaik, skor_terbaik = 0, -1
+    for mulai in range(0, len(teks) - panjang + 150, 150):
+        jendela = tokenisasi(teks[mulai:mulai + panjang])
+        skor = len(kata.intersection(jendela)) * 10 + sum(t in kata for t in jendela)
+        if skor > skor_terbaik:
+            terbaik, skor_terbaik = mulai, skor
+    potongan = teks[terbaik:terbaik + panjang]
+    return ("… " if terbaik else "") + potongan + (" …" if terbaik + panjang < len(teks) else "")
+
+
 def grade(state: ResearchState) -> dict:
     sebelumnya = state.get("relevant", []) if state.get("putaran", 0) > 0 else []
     chunks = state.get("chunks", [])
     if not chunks:
         return {"relevant": sebelumnya, "trace": _jejak(state, "grade: tidak ada kandidat")}
 
+    kata = {k for q in [state["question"], *state.get("queries", [])] for k in tokenisasi(q)}
     daftar = "\n\n".join(
-        f"[{i}] ({c['penulis']}, {c['tahun']}, judul: {c['judul'][:90]})\n{c['teks'][:POTONG_UNTUK_GRADE]}"
+        f"[{i}] ({c['penulis']}, {c['tahun']}, judul: {c['judul'][:90]})\n{_cuplikan_terbaik(c['teks'], kata)}"
         for i, c in enumerate(chunks, start=1)
     )
     prompt = prompts.GRADE.format(question=state["question"], chunks=daftar)

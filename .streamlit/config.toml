@@ -1,0 +1,6 @@
+[server]
+# Batas ukuran unggahan PDF (MB), sama dengan pemeriksaan di streamlit_app.py
+maxUploadSize = 20
+
+[browser]
+gatherUsageStats = false

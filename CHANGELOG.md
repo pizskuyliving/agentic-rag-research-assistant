@@ -1,5 +1,19 @@
 # Catatan perubahan
 
+## Paket 10 — UI Streamlit (22 Nov 2026)
+
+| File | Perubahan |
+|---|---|
+| `streamlit_app.py` | UI baru: unggah PDF, daftar & hapus jurnal, chat dengan sitasi (cuplikan teks per sumber), status langkah agen secara langsung, jejak agen opsional, contoh pertanyaan |
+| `streamlit_app.py` | Rumus dari paper ($N = 6$, $\sqrt{d_k}$) tampil sebagai rumus; tanda $ lain (harga) tetap di-escape |
+| `.streamlit/config.toml` | Batas unggahan 20 MB |
+| `streamlit_app.py` | Pertanyaan disimpan bersama jawabannya: tidak lagi muncul dua kali jika proses sempat terputus |
+| `app/ingestion/indexer.py` | `daftar_jurnal()` dan `hapus_jurnal()` untuk UI |
+| `app/ingestion/indexer.py` | Juara BM25: chunk peringkat 1 BM25 tiap query dijamin masuk kandidat. Tes: bagian 3.5 Positional Encoding (BM25 peringkat 1) kalah RRF dari pendahuluan hal. 1-2 |
+| `app/agent/nodes.py` | Grade melihat chunk utuh (1200 karakter, sebelumnya 750); chunk yang lebih panjang dikirim bagian yang paling banyak memuat kata pertanyaan. Tes: chunk berisi "Table 1 ..." lalu "3.5 Positional Encoding" terpotong sebelum bagian pentingnya |
+| `app/agent/nodes.py`, `indexer.py` | Batas kandidat per jurnal menyesuaikan ukuran koleksi (1 jurnal: 12, 2 jurnal: 6, 3+: 5). Tes: koleksi 1 jurnal hanya dapat 5 kandidat, pertanyaan positional encoding gagal |
+| `requirements.txt`, `README.md` | `streamlit`, cara menjalankan UI |
+
 ## Paket 9 — Jangkar entitas + kerangka perbandingan + NVIDIA (22 Nov 2026)
 
 **Hasil eval (2 putaran, NVIDIA gpt-oss-120b): putaran 1 = 56/56 (100%), putaran 2 = 55/56 (98,2%), rata-rata 99,1%.**

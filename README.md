@@ -5,6 +5,18 @@ Asisten yang menjawab pertanyaan riset berdasarkan jurnal PDF milik pengguna, de
 Status: **Minggu 3** — agen LangGraph (router → retrieve → grade → generate) + API FastAPI.
 Lihat `CHANGELOG.md` untuk daftar perubahan.
 
+## Menjalankan UI (Streamlit)
+
+```bash
+pip install -r requirements.txt          # tambahan: streamlit
+docker compose up -d                     # Qdrant harus menyala
+streamlit run streamlit_app.py           # buka http://localhost:8501
+```
+
+Panel kiri: unggah PDF, lihat dan hapus jurnal di koleksi. Halaman utama: tanya-jawab dengan
+sitasi yang bisa dibuka untuk melihat cuplikan teks aslinya. Aktifkan "Tampilkan jejak agen"
+untuk melihat langkah agen (retrieve, grade, evaluasi, generate).
+
 ## Menjalankan agen (minggu 3)
 
 ```bash

@@ -163,6 +163,38 @@ def _indeks_bm25(user_id: str) -> tuple[BM25, list[dict]]:
     return simpan[1], simpan[2]
 
 
+def daftar_jurnal(user_id: str) -> list[dict]:
+    """Ringkasan setiap jurnal milik user (untuk UI): judul, penulis, tahun, jumlah chunk & halaman."""
+    siapkan_koleksi()
+    _, dokumen = _indeks_bm25(user_id)
+    ringkas: dict[str, dict] = {}
+    for d in dokumen:
+        r = ringkas.setdefault(d["paper_id"], {
+            "paper_id": d["paper_id"], "judul": d.get("judul") or "(tanpa judul)",
+            "penulis": d.get("penulis") or "-", "tahun": d.get("tahun"),
+            "nama_file": d.get("nama_file") or "", "chunk": 0, "halaman": 0})
+        r["chunk"] += 1
+        r["halaman"] = max(r["halaman"], d.get("halaman") or 0)
+    return sorted(ringkas.values(), key=lambda r: (r["penulis"] or "").lower())
+
+
+def jumlah_jurnal(user_id: str) -> int:
+    _, dokumen = _indeks_bm25(user_id)
+    return len({d["paper_id"] for d in dokumen})
+
+
+def hapus_jurnal(user_id: str, paper_id: str) -> None:
+    """Hapus semua chunk satu jurnal milik user dari Qdrant."""
+    _client().delete(
+        collection_name=config.QDRANT_COLLECTION,
+        points_selector=models.FilterSelector(filter=models.Filter(must=[
+            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id)),
+            models.FieldCondition(key="paper_id", match=models.MatchValue(value=paper_id)),
+        ])),
+    )
+    _cache_bm25.pop(user_id, None)
+
+
 def cari_tabel(queries: list[str], user_id: str, limit: int = 3) -> list[dict]:
     """Cari KHUSUS di antara chunk tabel ("[TABEL] ...") memakai BM25.
 
@@ -252,6 +284,11 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
       Chunk yang konsisten muncul di banyak daftar akan naik ke atas.
     - `maks_per_jurnal` mencegah satu jurnal menguasai semua hasil.
     - `paper_id` (opsional) membatasi pencarian ke SATU jurnal saja.
+    - Juara BM25: chunk peringkat 1 BM25 dari setiap query DIJAMIN ikut. RRF cenderung
+      mengunggulkan chunk "umum" (abstrak, pendahuluan) yang muncul sedang-sedang di banyak
+      daftar, dan menyingkirkan chunk yang sangat cocok di satu daftar saja. Tes: query
+      "Transformer positional encoding" menempatkan bagian 3.5 di BM25 peringkat 1, tetapi
+      kalah RRF dari pendahuluan hal. 1-2 dan tidak masuk 12 kandidat.
     """
     siapkan_koleksi()
     if isinstance(queries, str):
@@ -270,6 +307,7 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
         rrf[kunci] = rrf.get(kunci, 0.0) + 1.0 / (RRF_K + peringkat)
 
     bm25, dokumen = _indeks_bm25(user_id)
+    juara: list[tuple] = []
     for q in queries:
         for peringkat, item in enumerate(_cari_satu(q, user_id, limit=per_daftar, paper_id=paper_id), start=1):
             tambah(item, peringkat)
@@ -281,6 +319,10 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
             teratas = [i for i, _ in bm25.cari(q, limit=per_daftar)]
         for peringkat, i in enumerate(teratas, start=1):
             tambah(dokumen[i], peringkat)
+        if teratas:
+            k = (dokumen[teratas[0]]["paper_id"], dokumen[teratas[0]]["urutan"])
+            if k not in juara:
+                juara.append(k)
 
     for kunci, nilai in rrf.items():
         data[kunci]["rrf"] = round(nilai, 4)
@@ -294,4 +336,20 @@ def cari(queries: str | list[str], user_id: str, top_k: int = config.TOP_K,
         hasil.append(item)
         if len(hasil) == top_k:
             break
+
+    # Pastikan juara BM25 ikut: ganti kandidat RRF terlemah (yang bukan juara)
+    juara = juara[:top_k]
+    ada = {(h["paper_id"], h["urutan"]) for h in hasil}
+    for k in juara:
+        if k in ada:
+            continue
+        if len(hasil) >= top_k:
+            for idx in range(len(hasil) - 1, -1, -1):
+                if (hasil[idx]["paper_id"], hasil[idx]["urutan"]) not in juara:
+                    hasil.pop(idx)
+                    break
+            else:
+                continue
+        hasil.append(data[k])
+        ada.add(k)
     return hasil
