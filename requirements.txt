@@ -1,0 +1,20 @@
+# Baca PDF (teks per halaman + metadata)
+pymupdf>=1.24
+
+# Vector database
+qdrant-client>=1.12
+
+# Embedding lokal (gratis, multibahasa)
+sentence-transformers>=3.0
+
+# Satu pintu ke banyak LLM + cadangan otomatis (Groq, Gemini, Mistral, Claude, ...)
+litellm>=1.50
+
+# Baca file .env
+python-dotenv>=1.0
+
+# Minggu 3: agen + API
+langgraph>=0.2
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9   # dibutuhkan FastAPI untuk upload file

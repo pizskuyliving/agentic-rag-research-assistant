@@ -1,0 +1,294 @@
+"""Node-node agen. Setiap fungsi menerima state dan mengembalikan perubahan state."""
+import json
+import re
+
+from app import config
+from app.agent import prompts
+from app.agent.state import ResearchState
+from app.ingestion.indexer import ambil_chunk, cari
+from app.llm import panggil_llm
+from app.query import variasi_query
+
+# Berapa kandidat chunk yang diambil sebelum disaring Grade.
+# Grade terbukti andal membuang yang tidak relevan, jadi lebih aman mengambil kandidat lebih banyak.
+KANDIDAT_RETRIEVE = 12
+# Maksimal chunk per jurnal di daftar kandidat (3 terbukti memotong bagian metode)
+MAKS_PER_JURNAL_KANDIDAT = 5
+# Panjang maksimum tiap chunk saat dinilai Grade (hemat token, tapi cukup untuk melihat isinya)
+POTONG_UNTUK_GRADE = 750
+# Panjang cuplikan chunk saat Evaluasi memeriksa kecukupan
+POTONG_UNTUK_EVALUASI = 500
+# Berapa kali boleh mencari ulang (rewrite). 1 = maksimal dua kali pencarian per pertanyaan.
+MAKS_PUTARAN_ULANG = 1
+# Maksimal chunk relevan yang dikirim ke Generate (akumulasi semua putaran)
+MAKS_SUMBER_GENERATE = 6
+# Minimal proporsi kalimat klaim yang bersitasi; di bawah ini jawaban diminta diperbaiki
+MIN_RASIO_SITASI = 0.7
+# Batas total karakter konteks untuk Generate setelah ditambah chunk tetangga
+# (~12.000 karakter ≈ 3.000 token, aman untuk kuota 8.000 token/menit model besar)
+MAKS_KARAKTER_KONTEKS = 12000
+
+
+def _json(teks: str) -> dict | None:
+    """Ambil objek JSON pertama yang valid dari teks (toleran terhadap teks tambahan)."""
+    teks = teks or ""
+    try:
+        data = json.loads(teks)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    # cari setiap kemungkinan objek {...}, dari yang terpendek, sampai ada yang valid
+    for m in re.finditer(r"\{", teks):
+        for akhir in range(m.start() + 1, len(teks) + 1):
+            if teks[akhir - 1] == "}":
+                try:
+                    data = json.loads(teks[m.start():akhir])
+                    if isinstance(data, dict):
+                        return data
+                except json.JSONDecodeError:
+                    continue
+    return None
+
+
+def _nomor_relevan(data: dict | None, mentah: str, jumlah: int) -> set[int] | None:
+    """Ambil daftar nomor chunk relevan dari jawaban Grade, seberapa pun berantakan formatnya."""
+    nilai = None
+    if data:
+        for kunci in ("relevan", "relevant", "relevan_ids", "relevant_ids", "nomor"):
+            if kunci in data:
+                nilai = data[kunci]
+                break
+    if nilai is None:
+        # tanpa JSON valid: cari pola seperti "relevan": [1, 3] di teks mentah
+        m = re.search(r"relevan\w*\"?\s*:\s*\[([^\]]*)\]", mentah, re.IGNORECASE)
+        if not m:
+            return None
+        nilai = m.group(1)
+    if isinstance(nilai, (int, str)):
+        nilai = re.findall(r"\d+", str(nilai))
+    if not isinstance(nilai, list):
+        return None
+    hasil = set()
+    for n in nilai:
+        angka = re.findall(r"\d+", str(n))
+        if angka and 1 <= int(angka[0]) <= jumlah:
+            hasil.add(int(angka[0]))
+    return hasil
+
+
+def _jejak(state: ResearchState, pesan: str) -> list[str]:
+    return [*state.get("trace", []), pesan]
+
+
+# ---------------------------------------------------------------- router
+def router(state: ResearchState) -> dict:
+    route = "search"  # default aman: kalau ragu atau error, cari di koleksi
+    try:
+        data = _json(panggil_llm(prompts.ROUTER + state["question"], peran="ringan",
+                                 max_tokens=50, json_mode=True))
+        if data and data.get("route") == "direct":
+            route = "direct"
+    except Exception as e:
+        return {"route": route, "trace": _jejak(state, f"router error ({e}) -> search")}
+    return {"route": route, "trace": _jejak(state, f"router -> {route}")}
+
+
+def _kunci(c: dict) -> tuple:
+    return (c["paper_id"], c["urutan"])
+
+
+# ---------------------------------------------------------------- retrieve
+def retrieve(state: ResearchState) -> dict:
+    putaran = state.get("putaran", 0)
+    if putaran == 0:
+        queries = variasi_query(state["question"])
+        chunks = cari(queries, user_id=state["user_id"], top_k=KANDIDAT_RETRIEVE,
+                      maks_per_jurnal=MAKS_PER_JURNAL_KANDIDAT)
+        return {"queries": queries, "chunks": chunks,
+                "trace": _jejak(state, f"retrieve: {len(queries)} query -> {len(chunks)} kandidat")}
+
+    # Putaran ulang: pakai query hasil rewrite, dan lewati chunk yang sudah dinyatakan relevan
+    queries = state.get("query_baru", [])
+    sudah = {_kunci(c) for c in state.get("relevant", [])}
+    chunks = [c for c in cari(queries, user_id=state["user_id"], top_k=KANDIDAT_RETRIEVE,
+                              maks_per_jurnal=MAKS_PER_JURNAL_KANDIDAT) if _kunci(c) not in sudah]
+    return {"queries": [*state.get("queries", []), *queries], "chunks": chunks,
+            "trace": _jejak(state, f"retrieve ulang #{putaran}: {len(queries)} query baru -> "
+                                   f"{len(chunks)} kandidat baru")}
+
+
+# ---------------------------------------------------------------- grade
+def grade(state: ResearchState) -> dict:
+    sebelumnya = state.get("relevant", []) if state.get("putaran", 0) > 0 else []
+    chunks = state.get("chunks", [])
+    if not chunks:
+        return {"relevant": sebelumnya, "trace": _jejak(state, "grade: tidak ada kandidat")}
+
+    daftar = "\n\n".join(
+        f"[{i}] ({c['penulis']}, {c['tahun']}, judul: {c['judul'][:90]})\n{c['teks'][:POTONG_UNTUK_GRADE]}"
+        for i, c in enumerate(chunks, start=1)
+    )
+    prompt = prompts.GRADE.format(question=state["question"], chunks=daftar)
+    mentah = ""
+    try:
+        # SATU panggilan untuk semua chunk (bukan satu per chunk) supaya kuota hemat
+        mentah = panggil_llm(prompt, peran=config.PERAN_GRADE, max_tokens=300, json_mode=True)
+        dipilih = _nomor_relevan(_json(mentah), mentah, len(chunks))
+        if dipilih is None:
+            raise ValueError("format jawaban grade tidak valid")
+        relevant = [c for i, c in enumerate(chunks, start=1) if i in dipilih]
+    except Exception as e:
+        # gagal menilai -> jangan buang apa pun, biar Generate yang berhati-hati.
+        # Balasan mentah dicatat agar penyebabnya terlihat di jejak.
+        cuplikan = " ".join(mentah.split())[:150]
+        return {"relevant": [*sebelumnya, *chunks][:MAKS_SUMBER_GENERATE],
+                "trace": _jejak(state, f"grade error ({e}; balasan: {cuplikan!r}) -> pakai semua")}
+
+    # gabungkan dengan hasil putaran sebelumnya (yang lama didahulukan)
+    gabung = [*sebelumnya, *relevant][:MAKS_SUMBER_GENERATE]
+    return {"relevant": gabung,
+            "trace": _jejak(state, f"grade: {len(relevant)} dari {len(chunks)} relevan"
+                                   + (f" (total {len(gabung)})" if sebelumnya else ""))}
+
+
+# ---------------------------------------------------------------- evaluasi + rewrite
+def evaluasi(state: ResearchState) -> dict:
+    """Apakah chunk relevan sudah cukup? Jika belum, tulis query baru (rewrite) dan cari ulang.
+
+    Query baru disusun dari istilah yang MUNCUL di chunk yang sudah ditemukan, bukan dari
+    ingatan model (pelajaran dari tes: tebakan istilah dari ingatan meleset).
+    """
+    relevant = state.get("relevant", [])
+    putaran = state.get("putaran", 0)
+    if putaran >= MAKS_PUTARAN_ULANG:
+        keputusan = "generate" if relevant else "tidak_ada"
+        return {"keputusan": keputusan, "trace": _jejak(state, f"evaluasi: batas putaran -> {keputusan}")}
+
+    daftar = "\n\n".join(
+        f"- ({c['penulis']}, hal. {c['halaman']}) {' '.join(c['teks'].split())[:POTONG_UNTUK_EVALUASI]}"
+        for c in relevant
+    ) or "(belum ada potongan yang relevan)"
+    try:
+        data = _json(panggil_llm(prompts.EVALUASI.format(question=state["question"], chunks=daftar),
+                                 peran=config.PERAN_EVALUASI, max_tokens=400, json_mode=True)) or {}
+    except Exception as e:
+        keputusan = "generate" if relevant else "tidak_ada"
+        return {"keputusan": keputusan, "trace": _jejak(state, f"evaluasi error ({e}) -> {keputusan}")}
+
+    query_baru = [q.strip() for q in data.get("query_baru") or [] if isinstance(q, str) and q.strip()][:3]
+    if data.get("cukup") is True or not query_baru:
+        keputusan = "generate" if relevant else "tidak_ada"
+        return {"keputusan": keputusan, "trace": _jejak(state, f"evaluasi: cukup -> {keputusan}")}
+
+    kurang = str(data.get("yang_kurang", ""))[:100]
+    return {"keputusan": "ulang", "putaran": putaran + 1, "query_baru": query_baru,
+            "trace": _jejak(state, f"evaluasi: kurang ({kurang}) -> cari ulang")}
+
+
+def setelah_evaluasi(state: ResearchState) -> str:
+    return state.get("keputusan", "generate")
+
+
+# ---------------------------------------------------------------- context expansion
+def _perluas_tetangga(relevant: list[dict], user_id: str) -> tuple[list[dict], int]:
+    """Tambahkan chunk sebelum & sesudah setiap chunk relevan (context expansion).
+
+    Paper sering menjelaskan satu ide di beberapa paragraf berurutan: chunk yang lolos Grade
+    menyebut "retrieval evaluator", penjelasan aksinya ada di chunk berikutnya.
+    Hasil diurutkan per jurnal lalu per urutan, supaya teks terbaca bersambung.
+    """
+    ada = {_kunci(c) for c in relevant}
+    perlu: dict[str, set[int]] = {}
+    for c in relevant:
+        for u in (c["urutan"] - 1, c["urutan"] + 1):
+            if u >= 0 and (c["paper_id"], u) not in ada:
+                perlu.setdefault(c["paper_id"], set()).add(u)
+
+    tetangga = []
+    for paper_id, urutan in perlu.items():
+        try:
+            tetangga += ambil_chunk(user_id, paper_id, sorted(urutan))
+        except Exception:
+            continue  # gagal mengambil tetangga bukan alasan untuk gagal menjawab
+
+    semua = {_kunci(c): c for c in [*relevant, *tetangga]}
+    urut = sorted(semua.values(), key=lambda c: (c["paper_id"], c["urutan"]))
+
+    # batasi total panjang konteks agar tetap di bawah kuota token per menit
+    hasil, total = [], 0
+    for c in urut:
+        if total + len(c["teks"]) > MAKS_KARAKTER_KONTEKS and _kunci(c) not in ada:
+            continue
+        hasil.append(c)
+        total += len(c["teks"])
+    return hasil, len(hasil) - len(relevant)
+
+
+# ---------------------------------------------------------------- generate
+def generate(state: ResearchState) -> dict:
+    sumber, tambahan = _perluas_tetangga(state["relevant"], state["user_id"])
+    state = {**state, "trace": _jejak(state, f"perluas konteks: +{tambahan} chunk tetangga")}
+    konteks = "\n\n".join(
+        f"[{i}] {s['penulis']} ({s['tahun']}), hal. {s['halaman']}, judul: {s['judul']}\n{s['teks']}"
+        for i, s in enumerate(sumber, start=1)
+    )
+    # Aturan sitasi diulang di AKHIR pesan: dengan konteks panjang, model lebih patuh
+    # pada instruksi yang terakhir dibacanya.
+    pesan = (f"Potongan jurnal:\n{konteks}\n\nPertanyaan: {state['question']}\n\n"
+             f"{prompts.PENGINGAT_SITASI}")
+    jawaban = _rapikan_sitasi(panggil_llm(pesan, peran="berat", system=prompts.GENERATE_SYSTEM,
+                                          max_tokens=1200))
+
+    # Cek sitasi secara pasti (tanpa LLM). Jika kurang, minta perbaikan SATU kali.
+    ada, total, tanpa = _cek_sitasi(jawaban)
+    catatan = f"cek sitasi: {ada}/{total} kalimat bersitasi"
+    if total and ada / total < MIN_RASIO_SITASI:
+        daftar = "\n".join(f"- {k}" for k in tanpa[:8])
+        perbaikan = prompts.PERBAIKI_SITASI.format(jawaban=jawaban, daftar=daftar)
+        try:
+            baru = _rapikan_sitasi(panggil_llm(f"Potongan jurnal:\n{konteks}\n\n{perbaikan}",
+                                               peran="berat", system=prompts.GENERATE_SYSTEM,
+                                               max_tokens=1200))
+            ada2, total2, _ = _cek_sitasi(baru)
+            if total2 and ada2 / total2 > ada / total:
+                jawaban = baru
+                catatan += f" -> diperbaiki: {ada2}/{total2}"
+            else:
+                catatan += " -> perbaikan tidak lebih baik, pakai versi awal"
+        except Exception as e:
+            catatan += f" -> perbaikan gagal ({e})"
+    state = {**state, "trace": _jejak(state, catatan)}
+
+    # Hanya tampilkan sumber yang benar-benar disitasi di jawaban
+    dipakai = sorted({int(n) for n in re.findall(r"\[(\d+)\]", jawaban) if 1 <= int(n) <= len(sumber)})
+    citations = [{**sumber[n - 1], "nomor": n} for n in dipakai]
+    return {"answer": jawaban, "citations": citations, "from_collection": True,
+            "trace": _jejak(state, f"generate: {len(citations)} sumber disitasi")}
+
+
+def _rapikan_sitasi(teks: str) -> str:
+    """gpt-oss kadang menulis sitasi dengan kurung lebar 【1】 / ［1］ -> samakan jadi [1].
+    Juga [1, 3] / [1][3] dibiarkan, keduanya terbaca."""
+    teks = re.sub(r"[【［]\s*(\d+)\s*[】］]", r"[\1]", teks)
+    return re.sub(r"\[(\d+)\s*,\s*(\d+)\]", r"[\1][\2]", teks)
+
+
+def _cek_sitasi(jawaban: str) -> tuple[int, int, list[str]]:
+    """Hitung kalimat berisi klaim yang punya sitasi [n].
+    Kalimat pendek (judul, pembuka seperti 'Berikut perbedaannya:') tidak dihitung."""
+    teks = re.sub(r"\*\*|__|`", "", jawaban)
+    kalimat = [k.strip(" -•*\t") for k in re.split(r"(?<=[.!?])\s+|\n+", teks)]
+    klaim = [k for k in kalimat if len(k) >= 60]
+    tanpa = [k for k in klaim if not re.search(r"\[\d+\]", k)]
+    return len(klaim) - len(tanpa), len(klaim), tanpa
+
+
+def jawab_langsung(state: ResearchState) -> dict:
+    jawaban = panggil_llm(state["question"], peran="ringan", system=prompts.DIRECT_SYSTEM, max_tokens=500)
+    return {"answer": jawaban, "citations": [], "from_collection": False,
+            "trace": _jejak(state, "direct: dijawab tanpa koleksi")}
+
+
+def tidak_ada(state: ResearchState) -> dict:
+    return {"answer": prompts.TIDAK_ADA, "citations": [], "from_collection": False,
+            "trace": _jejak(state, "tidak_ada: tidak ada chunk relevan")}

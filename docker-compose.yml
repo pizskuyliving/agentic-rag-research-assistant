@@ -1,0 +1,7 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"   # REST API + dashboard (http://localhost:6333/dashboard)
+    volumes:
+      - ./qdrant_storage:/qdrant/storage   # data tetap ada walau container dimatikan
