@@ -109,9 +109,19 @@ def _completion(peran: str, **kwargs):
             harian = _kuota_harian(e)
             # Groq habis kuota harian, TAPI cadangan hanya sibuk sementara (mis. Gemini 503
             # "high demand"): tunggu sebentar lalu coba lagi, jangan langsung menyerah.
-            sementara = any(t in str(e) for t in ("503", "UNAVAILABLE", "high demand", "overloaded"))
-            if harian and sementara and percobaan < MAKS_COBA_ULANG:
-                print("   (kuota Groq habis dan model cadangan sedang sibuk, menunggu 20 detik...)")
+            # Error sementara dari server (mis. NVIDIA 410/502, Gemini 503 "high demand"):
+            # tunggu sebentar lalu coba lagi, jangan langsung menyerah.
+            sementara = any(t in str(e) for t in ("Error code: 410", "Error code: 500", "Error code: 502",
+                                                  "Error code: 504", "503", "UNAVAILABLE",
+                                                  "high demand", "overloaded", "Timeout"))
+            if sementara and percobaan < MAKS_COBA_ULANG:
+                print("   (server model sedang bermasalah sementara, menunggu 15 detik lalu coba lagi...)")
+                time.sleep(15)
+                continue
+            # Model utama BUKAN Groq (mis. NVIDIA): pesan "kuota harian" berasal dari cadangan Groq,
+            # sedangkan model utama biasanya hanya kena batas per menit -> tunggu lalu coba lagi.
+            if harian and not config.MODEL_BERAT.startswith("groq/") and percobaan < MAKS_COBA_ULANG:
+                print("   (model utama sibuk/batas per menit, cadangan Groq habis kuota harian; menunggu 20 detik...)")
                 time.sleep(20)
                 continue
             # kuota harian habis: menunggu sebentar tidak membantu; atau sudah dicoba berkali-kali

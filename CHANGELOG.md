@@ -1,6 +1,10 @@
 # Catatan perubahan
 
-## Paket 9 — Jangkar entitas + cadangan Gemini 3.5 (22 Nov 2026)
+## Paket 9 — Jangkar entitas + kerangka perbandingan + NVIDIA (22 Nov 2026)
+
+**Hasil eval (2 putaran, NVIDIA gpt-oss-120b): putaran 1 = 56/56 (100%), putaran 2 = 55/56 (98,2%), rata-rata 99,1%.**
+Target >= 95% tercapai. Satu-satunya poin hilang: #1 putaran 2 (7/8).
+Catatan kualitas untuk nanti: #9 benar tapi hanya 1 kalimat; #14 ikut menyebut paper yang hanya menyinggung BM25.
 
 Tes #1 setelah Paket 8: 1/8 lalu 3/8. Diagnosa: aturan "tambah hanya jika < 3 kandidat" tidak memicu
 (paper Asai sudah muncul, tapi bagian yang lemah seperti lampiran hal. 20), lalu Grade menolak sebagian besar.
@@ -14,7 +18,8 @@ Tes #1 setelah Paket 8: 1/8 lalu 3/8. Diagnosa: aturan "tambah hanya jika < 3 ka
 | `app/agent/state.py` | Field `jangkar` |
 | `scripts/cek_entitas.py` | Menampilkan chunk jangkar per metode (tanpa LLM) |
 | `app/llm.py`, `app/config.py` | Model utama boleh dari penyedia mana pun: API key dipilih dari awalan nama model (`groq/`, `nvidia_nim/`, `gemini/`, `mistral/`). Groq bisa jadi cadangan saat NVIDIA dipakai sebagai utama |
-| `app/llm.py` | Jika Groq habis kuota harian dan cadangan hanya sibuk sementara (503), tunggu 20 detik dan coba lagi (maks. 3x), tidak langsung berhenti |
+| `app/llm.py` | Jika model utama bukan Groq (NVIDIA), pesan kuota harian dari cadangan Groq tidak lagi menghentikan langkah: tunggu 20 detik lalu coba lagi model utama (maks. 3x) |
+| `app/llm.py` | Error sementara dari server (NVIDIA 410/500/502/504, Gemini 503 "high demand", timeout): tunggu 15 detik lalu coba lagi (maks. 3x), tidak langsung berhenti |
 | `app/config.py`, `app/llm.py`, `.env.example` | Cadangan NVIDIA (`nvidia_nim/openai/gpt-oss-120b`, model sama dengan Groq) dipakai pertama, lalu Gemini, lalu Mistral |
 | `app/config.py`, `.env.example` | Cadangan Gemini: `gemini-3.5-flash-lite` (2.5 tidak tersedia untuk pengguna baru) |
 
