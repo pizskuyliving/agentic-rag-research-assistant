@@ -1,5 +1,11 @@
 # Catatan perubahan
 
+## Paket 11 — README portofolio (24 Nov 2026)
+
+Eval setelah perbaikan #14: **55/56 (98,2%)**, #14 = 2/2. README ditulis ulang (bahasa Inggris + ringkasan Indonesia):
+hasil evaluasi, diagram alur (Mermaid), keputusan desain, tech stack, cara menjalankan, batasan.
+NVIDIA: gpt-oss-120b tidak lagi tersedia di API gratis (410); cadangan NVIDIA dikosongkan.
+
 ## Paket 10 — UI Streamlit (22 Nov 2026)
 
 | File | Perubahan |
